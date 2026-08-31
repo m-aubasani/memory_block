@@ -65,8 +65,15 @@ class AlignedInjectedLLM(nn.Module):
             
             def make_hook(attn_mod):
                 def hook(module, args, output):
-                    hidden_states = output[0]
+                    # Safely handle both tuples and bare tensors
+                    if isinstance(output, tuple):
+                        hidden_states = output[0]
+                    else:
+                        hidden_states = output
+                        
                     new_hidden_states = attn_mod(hidden_states, memory_states)
+                    
+                    # Repackage tuple if needed
                     if isinstance(output, tuple):
                         return (new_hidden_states,) + output[1:]
                     return new_hidden_states

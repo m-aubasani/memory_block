@@ -27,9 +27,13 @@ class InjectedGenerator:
             
             def make_hook(attn_mod):
                 def hook(module, args, output):
-                    hidden_states = output[0]
-                    # The hook now uses the pre-computed memory_states from the outer scope!
+                    if isinstance(output, tuple):
+                        hidden_states = output[0]
+                    else:
+                        hidden_states = output
+                        
                     new_hidden = attn_mod(hidden_states, memory_states)
+                    
                     if isinstance(output, tuple):
                         return (new_hidden,) + output[1:]
                     return new_hidden
