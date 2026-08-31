@@ -61,7 +61,7 @@ if __name__ == "__main__":
     
     # 1. Load Tokenizer & Model
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    base_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+    base_model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
     
     # 2. Initialize your custom architecture 
     # (In a real scenario, you would load your trained state_dict here: model.load_state_dict(...))

@@ -24,7 +24,7 @@ def main():
     # 2. LOAD & WRAP MODEL
     print("Loading Base Model in bfloat16...")
     base_model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16
+        model_name, dtype=torch.bfloat16
     ).to(device)
     
     print("Wrapping model with Axiomatic Injection Blocks...")
@@ -33,7 +33,7 @@ def main():
         hidden_size=base_model.config.hidden_size,
         extraction_layer=8,
         injection_layers=[8, 16]
-    ).to(device)
+    ).to(device, dtype=torch.bfloat16)
 
     # Freeze base model, unfreeze custom blocks
     for param in model.base_model.parameters(): 
