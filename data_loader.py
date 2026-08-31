@@ -1,21 +1,16 @@
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer
 from datasets import load_dataset
 
 class AlignmentDataset(Dataset):
-    def __init__(self, model_name="Qwen/Qwen2.5-1.5B-Instruct", split="train", max_samples=5000):
-        print("Loading PKU-SafeRLHF dataset...")
+    # CHANGED: Now accepts 'tokenizer' directly instead of 'model_name'
+    def __init__(self, tokenizer, split="train", max_samples=5000):
+        print(f"Loading PKU-SafeRLHF dataset ({split} split)...")
         self.dataset = load_dataset("PKU-Alignment/PKU-SafeRLHF", split=split)
         
         # Take a subset for rapid prototyping
         self.dataset = self.dataset.select(range(min(max_samples, len(self.dataset))))
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # Qwen uses eos_token as pad_token if not set
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            
+        self.tokenizer = tokenizer
         self.max_length = 256
         
         # 🛡️ THE AXIOM BLOCK (The rules we will inject into the middle layers)
@@ -61,5 +56,6 @@ class AlignmentDataset(Dataset):
             "memory_ids": self.memory_ids, # The immutable rules
             "input_ids": encodings.input_ids.squeeze(0),
             "attention_mask": encodings.attention_mask.squeeze(0),
-            "prompt_len": prompt_len # We will use this to mask the loss
+            "prompt_len": prompt_len, # We will use this to mask the loss
+            "prompt_text": user_prompt  # Added this so eval.py can easily reference the raw prompt
         }
