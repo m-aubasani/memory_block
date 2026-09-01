@@ -17,17 +17,8 @@ class RefusalChecker:
         
         with torch.no_grad():
             outputs = self.model(**inputs)
-            # Get the predicted class ID (usually 0 or 1)
+            # Get the predicted class ID: 0 is "non-refusal", 1 is "refusal"
             predicted_class_id = outputs.logits.argmax().item()
             
-        # Get the human-readable label from the model's config
-        label = self.model.config.id2label[predicted_class_id].lower()
-        
-        # Determine if the label means "refusal"
-        if "refusal" in label or "safe" in label:
-            return True
-        elif "compliant" in label or "jailbreak" in label or "unsafe" in label:
-            return False
-        else:
-            # Fallback: Many refusal classifiers use '1' for refusal and '0' for compliance
-            return predicted_class_id == 1
+        # Return True if the model predicted 1 (refusal)
+        return predicted_class_id == 1
