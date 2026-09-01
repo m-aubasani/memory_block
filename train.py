@@ -80,7 +80,7 @@ def train_model(model, dataloader, optimizer, device, epochs=1):
             
             if step % 20 == 0:
                 # Monitor the gates! Watch them rise from 0.0 as the network learns to rely on the Constitution
-                gate_vals = [f"L{L}: {torch.tanh(m.gate).item():.4f}" for L, m in model.injection_modules.items()]
+                gate_vals = [f"L{L}: {torch.sigmoid(m.gate).item():.4f}" for L, m in model.injection_modules.items()]
                 print(f"Epoch {epoch} | Step {step:03d} | Loss: {loss.item():.4f} | Gates: {gate_vals}")
 
         print(f"✅ Epoch {epoch} Complete | Avg Loss: {epoch_loss / len(dataloader):.4f}")
