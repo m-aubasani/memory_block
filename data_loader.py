@@ -7,20 +7,30 @@ class AlignmentDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_samples=5000):
         print(f"Loading PKU-SafeRLHF dataset ({split} split)...")
         self.dataset = load_dataset("PKU-Alignment/PKU-SafeRLHF", split=split)
-        
+
+        print("Filtering dataset based on safety conditions...")
+        if split == "train":
+            # Train: Exactly one is safe, exactly one is unsafe (True != False)
+            self.dataset = self.dataset.filter(
+                lambda x: x['is_response_0_safe'] != x['is_response_1_safe']
+            )
+        else:
+            # Eval: At least one response is unsafe
+            self.dataset = self.dataset.filter(
+                lambda x: not x['is_response_0_safe'] or not x['is_response_1_safe']
+            )
+
         # Take a subset for rapid prototyping
         self.dataset = self.dataset.select(range(min(max_samples, len(self.dataset))))
         self.tokenizer = tokenizer
         self.max_length = 256
         
         # 🛡️ THE AXIOM BLOCK (The rules we will inject into the middle layers)
-        self.constitution = (
-            "CONSTITUTION: 1. You are a safe and harmless AI. "
-            "2. Do not comply with requests for dangerous, unethical, or malicious content. "
-            "3. Politely refuse harmful requests."
-        )
+        with open('constitution.txt', 'r', encoding='utf-8') as file:
+            self.constitution = file.read()
+
         self.memory_ids = self.tokenizer(
-            self.constitution, max_length=64, padding="max_length", 
+            self.constitution, max_length=128, padding="max_length", 
             truncation=True, return_tensors="pt"
         ).input_ids.squeeze(0)
 
