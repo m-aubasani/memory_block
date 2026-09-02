@@ -69,7 +69,12 @@ if __name__ == "__main__":
     
     # 2. Initialize your custom architecture 
     # (In a real scenario, you would load your trained state_dict here: model.load_state_dict(...))
-    model = AlignedInjectedLLM(base_model, hidden_size=1536, vocab_size=base_model.config.vocab_size).to(device)
+    model = AlignedInjectedLLM(
+        base_model=base_model,
+        hidden_size=base_model.config.hidden_size,
+        extraction_layer=8,
+        injection_layers=[8, 16]
+    ).to(device)
     model.eval() # Set to evaluation mode
     
     generator = InjectedGenerator(model)

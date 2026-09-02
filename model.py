@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 
 class GatedCrossAttention(nn.Module):
-    def __init__(self, hidden_size, num_heads=8):
+    def __init__(self, hidden_size, num_heads=8, init_gate_value=-10.0):
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=hidden_size, num_heads=num_heads, batch_first=True
         )
         # Start exactly at 0 so the pre-trained LLM isn't corrupted on step 1
-        self.gate = nn.Parameter(torch.tensor([-10.0]))
+        self.gate = nn.Parameter(torch.tensor([init_gate_value]))
 
     def forward(self, hidden_states, memory_states):
         attn_output, _ = self.cross_attn(
@@ -18,11 +18,10 @@ class GatedCrossAttention(nn.Module):
         return hidden_states + torch.sigmoid(self.gate) * attn_output
 
 class ConstraintEncoder(nn.Module):
-    # Removed vocab_size, it now directly accepts hidden states
-    def __init__(self, hidden_size, num_layers=2):
+    def __init__(self, hidden_size, num_layers=2, num_heads=8):
         super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size, nhead=8, dim_feedforward=hidden_size * 4, batch_first=True
+            d_model=hidden_size, nhead=num_heads, dim_feedforward=hidden_size * 4, batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
@@ -32,18 +31,29 @@ class ConstraintEncoder(nn.Module):
 
 
 class AlignedInjectedLLM(nn.Module):
-    # Added extraction_layer (e.g., K=8)
-    def __init__(self, base_model, hidden_size, extraction_layer=8, injection_layers=[8, 16]):
+    def __init__(
+        self,
+        base_model,
+        hidden_size,
+        extraction_layer,
+        injection_layers,
+        num_encoder_layers=2,
+        num_heads=8,
+    ):
         super().__init__()
         self.base_model = base_model
         self.extraction_layer = extraction_layer
         self.injection_layers = injection_layers
         
-        # Initialized without vocab_size
-        self.constraint_encoder = ConstraintEncoder(hidden_size)
+        self.constraint_encoder = ConstraintEncoder(
+            hidden_size=hidden_size,
+            num_layers=num_encoder_layers,
+            num_heads=num_heads,
+        )
         
         self.injection_modules = nn.ModuleDict({
-            str(layer): GatedCrossAttention(hidden_size) for layer in injection_layers
+            str(layer): GatedCrossAttention(hidden_size, num_heads=num_heads)
+            for layer in injection_layers
         })
 
     def forward(self, input_ids, attention_mask, memory_ids, labels=None):

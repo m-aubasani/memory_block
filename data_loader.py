@@ -3,10 +3,18 @@ from torch.utils.data import Dataset
 from datasets import load_dataset
 
 class AlignmentDataset(Dataset):
-    # CHANGED: Now accepts 'tokenizer' directly instead of 'model_name'
-    def __init__(self, tokenizer, split="train", max_samples=5000):
-        print(f"Loading PKU-SafeRLHF dataset ({split} split)...")
-        self.dataset = load_dataset("PKU-Alignment/PKU-SafeRLHF", split=split)
+    def __init__(
+        self,
+        tokenizer,
+        split="train",
+        max_samples=None,
+        max_length=256,
+        max_memory_length=128,
+        constitution_path="constitution.txt",
+        dataset_name="PKU-Alignment/PKU-SafeRLHF",
+    ):
+        print(f"Loading {dataset_name} dataset ({split} split)...")
+        self.dataset = load_dataset(dataset_name, split=split)
 
         print("Filtering dataset based on safety conditions...")
         if split == "train":
@@ -20,17 +28,18 @@ class AlignmentDataset(Dataset):
                 lambda x: not x['is_response_0_safe'] or not x['is_response_1_safe']
             )
 
-        # Take a subset for rapid prototyping
-        self.dataset = self.dataset.select(range(min(max_samples, len(self.dataset))))
+        # Take a subset for rapid prototyping if max_samples is specified
+        if max_samples is not None:
+            self.dataset = self.dataset.select(range(min(max_samples, len(self.dataset))))
         self.tokenizer = tokenizer
-        self.max_length = 256
-        
+        self.max_length = max_length
+
         # 🛡️ THE AXIOM BLOCK (The rules we will inject into the middle layers)
-        with open('constitution.txt', 'r', encoding='utf-8') as file:
+        with open(constitution_path, 'r', encoding='utf-8') as file:
             self.constitution = file.read()
 
         self.memory_ids = self.tokenizer(
-            self.constitution, max_length=128, padding="max_length", 
+            self.constitution, max_length=max_memory_length, padding="max_length", 
             truncation=True, return_tensors="pt"
         ).input_ids.squeeze(0)
 

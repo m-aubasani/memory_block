@@ -7,17 +7,27 @@ from tqdm import tqdm
 from refusal_checker import RefusalChecker
 
 
-def run_evaluation(model, tokenizer, generator, num_samples=100):
+def run_evaluation(
+    model,
+    tokenizer,
+    generator,
+    num_samples=100,
+    max_new_tokens=100,
+    constitution_path="constitution.txt",
+    dataset_name="PKU-Alignment/PKU-SafeRLHF",
+    refusal_model_name="natong19/refusal_classifier",
+    output_path="alignment_eval_results.csv",
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    checker = RefusalChecker(device=device)
+    checker = RefusalChecker(model_name=refusal_model_name, device=device)
 
-    print("Loading test dataset...")
+    print(f"Loading {dataset_name} test dataset...")
     # Use the test split to ensure it's data the model hasn't seen
-    dataset = load_dataset("PKU-Alignment/PKU-SafeRLHF", split="test").select(range(num_samples))
+    dataset = load_dataset(dataset_name, split="test").select(range(num_samples))
     
     # 🛡️ THE AXIOM BLOCK (The rules we will inject into the middle layers)
-    with open('constitution.txt', 'r', encoding='utf-8') as file:
+    with open(constitution_path, 'r', encoding='utf-8') as file:
         constitution = file.read()
     memory_ids = tokenizer(constitution, return_tensors="pt").input_ids.to(device)
     
@@ -47,15 +57,15 @@ def run_evaluation(model, tokenizer, generator, num_samples=100):
         # ==========================================
         with torch.no_grad():
             # 1. Base Generation (No hooks active!)
-            out_base = model.base_model.generate(ids_base, max_new_tokens=100, pad_token_id=tokenizer.eos_token_id)
+            out_base = model.base_model.generate(ids_base, max_new_tokens=max_new_tokens, pad_token_id=tokenizer.eos_token_id)
             res_base = tokenizer.decode(out_base[0][ids_base.shape[1]:], skip_special_tokens=True)
             
             # 2. System Prompt Generation (No hooks active!)
-            out_sys = model.base_model.generate(ids_sys, max_new_tokens=100, pad_token_id=tokenizer.eos_token_id)
+            out_sys = model.base_model.generate(ids_sys, max_new_tokens=max_new_tokens, pad_token_id=tokenizer.eos_token_id)
             res_sys = tokenizer.decode(out_sys[0][ids_sys.shape[1]:], skip_special_tokens=True)
             
             # 3. Injected Generation (Hooks Active, NO system prompt)
-            out_inj = generator.generate(ids_base, memory_ids=memory_ids, max_new_tokens=100, pad_token_id=tokenizer.eos_token_id)
+            out_inj = generator.generate(ids_base, memory_ids=memory_ids, max_new_tokens=max_new_tokens, pad_token_id=tokenizer.eos_token_id)
             res_inj = tokenizer.decode(out_inj[0][ids_base.shape[1]:], skip_special_tokens=True)
             
         results.append({
@@ -84,8 +94,8 @@ def run_evaluation(model, tokenizer, generator, num_samples=100):
     print("="*40)
     
     # Save to CSV for manual review or passing to an LLM-Judge later
-    df.to_csv("alignment_eval_results.csv", index=False)
-    print("Saved detailed outputs to 'alignment_eval_results.csv'")
+    df.to_csv(output_path, index=False)
+    print(f"Saved detailed outputs to '{output_path}'")
 
 # Run it
 # run_evaluation(model, tokenizer, generator, num_samples=50)

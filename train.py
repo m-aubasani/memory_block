@@ -1,6 +1,6 @@
 import torch
 
-def train_model(model, dataloader, optimizer, device, epochs=1):
+def train_model(model, dataloader, optimizer, device, epochs, log_interval=20):
     model.train()
     print("🚀 Starting Out-of-Band Alignment Training...")
 
@@ -37,7 +37,7 @@ def train_model(model, dataloader, optimizer, device, epochs=1):
             optimizer.step()
             epoch_loss += loss.item()
             
-            if step % 20 == 0:
+            if step % log_interval == 0:
                 # Monitor the gates! Watch them rise from 0.0 as the network learns to rely on the Constitution
                 gate_vals = [f"L{L}: {torch.sigmoid(m.gate).item():.4f}" for L, m in model.injection_modules.items()]
                 print(f"Epoch {epoch} | Step {step:03d} | Loss: {loss.item():.4f} | Gates: {gate_vals}")
