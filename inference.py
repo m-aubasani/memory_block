@@ -14,32 +14,36 @@ class InjectedGenerator:
         self.handles = []
         
     def generate(self, input_ids, memory_ids, attention_mask=None, **kwargs):
-        # 1. Pre-compute the Constitution using Layer K
+        # 1. Pre-compute the Constitution representations for each layer pair
         with torch.no_grad():
             memory_base_outputs = self.model.base_model(memory_ids, output_hidden_states=True)
-            memory_base_states = memory_base_outputs.hidden_states[self.model.extraction_layer]
-            memory_states = self.model.constraint_encoder(memory_base_states)
+            
+            memory_states_by_layer = {}
+            for ext_layer, inj_layer in self.model.layer_pairs:
+                raw_mem_states = memory_base_outputs.hidden_states[ext_layer]
+                memory_states_by_layer[inj_layer] = self.model.constraint_encoders[str(inj_layer)](raw_mem_states)
             
         # 2. Attach the hooks dynamically
-        for layer_idx in self.model.injection_layers:
-            target_layer = self.model.base_model.model.layers[layer_idx]
-            attn_module = self.model.injection_modules[str(layer_idx)]
+        for ext_layer, inj_layer in self.model.layer_pairs:
+            target_layer = self.model.base_model.model.layers[inj_layer]
+            attn_module = self.model.injection_modules[str(inj_layer)]
+            mem_states = memory_states_by_layer[inj_layer]
             
-            def make_hook(attn_mod):
+            def make_hook(attn_mod, mem_st):
                 def hook(module, args, output):
                     if isinstance(output, tuple):
                         hidden_states = output[0]
                     else:
                         hidden_states = output
                         
-                    new_hidden = attn_mod(hidden_states, memory_states)
+                    new_hidden = attn_mod(hidden_states, mem_st)
                     
                     if isinstance(output, tuple):
                         return (new_hidden,) + output[1:]
                     return new_hidden
                 return hook
             
-            handle = target_layer.register_forward_hook(make_hook(attn_module))
+            handle = target_layer.register_forward_hook(make_hook(attn_module, mem_states))
             self.handles.append(handle)
             
         # 3. Run HuggingFace's highly optimized generate loop
@@ -72,8 +76,8 @@ if __name__ == "__main__":
     model = AlignedInjectedLLM(
         base_model=base_model,
         hidden_size=base_model.config.hidden_size,
-        extraction_layer=8,
-        injection_layers=[8, 16]
+        extraction_layers=[8, 16],
+        injection_layers=[8, 16],
     ).to(device)
     model.eval() # Set to evaluation mode
     

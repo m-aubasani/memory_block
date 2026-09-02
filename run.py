@@ -63,7 +63,8 @@ def main():
     model = AlignedInjectedLLM(
         base_model=base_model, 
         hidden_size=base_model.config.hidden_size,
-        extraction_layer=model_cfg.get("extraction_layer", 8),
+        layer_pairs=model_cfg.get("layer_pairs", None),
+        extraction_layers=model_cfg.get("extraction_layers", [8, 16]),
         injection_layers=model_cfg.get("injection_layers", [8, 16]),
         num_encoder_layers=model_cfg.get("num_encoder_layers", 2),
         num_heads=model_cfg.get("num_heads", 8),
@@ -72,7 +73,7 @@ def main():
     # Freeze base model, unfreeze custom blocks
     for param in model.base_model.parameters(): 
         param.requires_grad = False
-    for param in model.constraint_encoder.parameters(): 
+    for param in model.constraint_encoders.parameters(): 
         param.requires_grad = True
     for param in model.injection_modules.parameters(): 
         param.requires_grad = True

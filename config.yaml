@@ -1,6 +1,8 @@
 model:
   name: "Qwen/Qwen2.5-1.5B-Instruct"
-  extraction_layer: 8
+  extraction_layers:
+    - 8
+    - 16
   injection_layers:
     - 8
     - 16

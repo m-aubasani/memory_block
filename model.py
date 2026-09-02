@@ -35,45 +35,68 @@ class AlignedInjectedLLM(nn.Module):
         self,
         base_model,
         hidden_size,
-        extraction_layer,
-        injection_layers,
+        layer_pairs=None,
+        extraction_layers=None,
+        injection_layers=None,
         num_encoder_layers=2,
         num_heads=8,
     ):
         super().__init__()
         self.base_model = base_model
-        self.extraction_layer = extraction_layer
-        self.injection_layers = injection_layers
+
+        if layer_pairs is not None:
+            self.layer_pairs = [tuple(p) for p in layer_pairs]
+        elif extraction_layers is not None and injection_layers is not None:
+            if isinstance(extraction_layers, int) and isinstance(injection_layers, int):
+                self.layer_pairs = [(extraction_layers, injection_layers)]
+            elif isinstance(extraction_layers, int) and isinstance(injection_layers, list):
+                self.layer_pairs = [(extraction_layers, inj) for inj in injection_layers]
+            elif isinstance(extraction_layers, list) and isinstance(injection_layers, list):
+                assert len(extraction_layers) == len(injection_layers), (
+                    f"extraction_layers (len {len(extraction_layers)}) and injection_layers "
+                    f"(len {len(injection_layers)}) must have the same length"
+                )
+                self.layer_pairs = list(zip(extraction_layers, injection_layers))
+            else:
+                raise ValueError("Invalid format for extraction_layers and injection_layers.")
+        else:
+            raise ValueError("Must provide either layer_pairs or extraction_layers and injection_layers.")
         
-        self.constraint_encoder = ConstraintEncoder(
-            hidden_size=hidden_size,
-            num_layers=num_encoder_layers,
-            num_heads=num_heads,
-        )
+        # Dedicated ConstraintEncoder and GatedCrossAttention per layer pair / injection layer
+        self.constraint_encoders = nn.ModuleDict({
+            str(inj): ConstraintEncoder(
+                hidden_size=hidden_size,
+                num_layers=num_encoder_layers,
+                num_heads=num_heads,
+            )
+            for ext, inj in self.layer_pairs
+        })
         
         self.injection_modules = nn.ModuleDict({
-            str(layer): GatedCrossAttention(hidden_size, num_heads=num_heads)
-            for layer in injection_layers
+            str(inj): GatedCrossAttention(hidden_size, num_heads=num_heads)
+            for ext, inj in self.layer_pairs
         })
 
     def forward(self, input_ids, attention_mask, memory_ids, labels=None):
-        # 1. Pass Constitution through the first K layers of the frozen LLM
+        # 1. Pass Constitution through the base LLM to extract hidden states across layers
         with torch.no_grad(): # We don't need gradients for the base model's memory processing
-            # output_hidden_states=True returns a tuple where index 0 is embeddings, index 1 is layer 1, etc.
             memory_base_outputs = self.base_model(memory_ids, output_hidden_states=True)
-            memory_base_states = memory_base_outputs.hidden_states[self.extraction_layer]
 
-        # 2. Pass those rich representations into our small transformer
-        memory_states = self.constraint_encoder(memory_base_states)
+        # 2. Encode memory states separately for each layer pair
+        memory_states_by_layer = {}
+        for ext_layer, inj_layer in self.layer_pairs:
+            raw_mem_states = memory_base_outputs.hidden_states[ext_layer]
+            memory_states_by_layer[inj_layer] = self.constraint_encoders[str(inj_layer)](raw_mem_states)
         
         hook_handles = []
         
-        # 2. Intercept the hidden states of the base LLM
-        for layer_idx in self.injection_layers:
-            target_layer = self.base_model.model.layers[layer_idx]
-            attn_module = self.injection_modules[str(layer_idx)]
+        # 3. Intercept the hidden states of the base LLM and inject corresponding memory representation
+        for ext_layer, inj_layer in self.layer_pairs:
+            target_layer = self.base_model.model.layers[inj_layer]
+            attn_module = self.injection_modules[str(inj_layer)]
+            mem_states = memory_states_by_layer[inj_layer]
             
-            def make_hook(attn_mod):
+            def make_hook(attn_mod, mem_st):
                 def hook(module, args, output):
                     # Safely handle both tuples and bare tensors
                     if isinstance(output, tuple):
@@ -81,7 +104,7 @@ class AlignedInjectedLLM(nn.Module):
                     else:
                         hidden_states = output
                         
-                    new_hidden_states = attn_mod(hidden_states, memory_states)
+                    new_hidden_states = attn_mod(hidden_states, mem_st)
                     
                     # Repackage tuple if needed
                     if isinstance(output, tuple):
@@ -89,15 +112,15 @@ class AlignedInjectedLLM(nn.Module):
                     return new_hidden_states
                 return hook
             
-            handle = target_layer.register_forward_hook(make_hook(attn_module))
+            handle = target_layer.register_forward_hook(make_hook(attn_module, mem_states))
             hook_handles.append(handle)
         
-        # 3. Standard Forward Pass
+        # 4. Standard Forward Pass
         outputs = self.base_model(
             input_ids=input_ids, attention_mask=attention_mask, labels=labels
         )
         
-        # 4. Remove hooks to prevent infinite graph memory leaks
+        # 5. Remove hooks to prevent infinite graph memory leaks
         for handle in hook_handles:
             handle.remove()
             
