@@ -95,7 +95,15 @@ def main():
         shuffle=True,
     )
     lr = float(train_cfg.get("learning_rate", 3e-4))
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    gate_lr = float(train_cfg.get("gate_learning_rate", lr*100))
+
+    gate_params = [p for n, p in model.named_parameters() if p.requires_grad and "gate" in n]
+    other_params = [p for n, p in model.named_parameters() if p.requires_grad and "gate" not in n]
+
+    optimizer = optim.AdamW([
+        {"params": other_params, "lr": lr},
+        {"params": gate_params, "lr": gate_lr},
+    ])
 
     # 4. TRAINING PHASE
     print("\n--- Starting Training Phase ---")
