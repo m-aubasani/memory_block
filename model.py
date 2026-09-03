@@ -8,14 +8,14 @@ class GatedCrossAttention(nn.Module):
             embed_dim=hidden_size, num_heads=num_heads, batch_first=True
         )
         # Start exactly at 0 so the pre-trained LLM isn't corrupted on step 1
-        self.gate = nn.Parameter(torch.zeros(1))
+        self.gate = nn.Parameter(torch.tensor([-4.0]))
 
     def forward(self, hidden_states, memory_states):
         attn_output, _ = self.cross_attn(
             query=hidden_states, key=memory_states, value=memory_states
         )
-        # H_new = H_old + tanh(gate) * Constitution_Info
-        return hidden_states + torch.tanh(self.gate) * attn_output
+        # H_new = H_old + sigmoid(gate) * Constitution_Info
+        return hidden_states + torch.sigmoid(self.gate) * attn_output
 
 class ConstraintEncoder(nn.Module):
     def __init__(self, hidden_size, num_layers=2, num_heads=8):

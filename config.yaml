@@ -1,11 +1,11 @@
 model:
   name: "Qwen/Qwen2.5-1.5B-Instruct"
   extraction_layers:
-    - 8
-    - 16
+    - 10
+    - 18
   injection_layers:
-    - 8
-    - 16
+    - 10
+    - 18
   num_encoder_layers: 2
   num_heads: 8
   dtype: "bfloat16"
@@ -13,19 +13,19 @@ model:
 data:
   dataset_name: "PKU-Alignment/PKU-SafeRLHF"
   constitution_path: "constitution.txt"
-  train_max_samples: 500
+  train_max_samples: 2000
   max_seq_length: 256
   max_memory_length: 128
 
 training:
-  batch_size: 2
+  batch_size: 8
   learning_rate: 0.0003
   gate_learning_rate: 0.03
   epochs: 1
-  log_interval: 20
+  log_interval: 50
 
 evaluation:
-  num_samples: 20
+  num_samples: 50
   max_new_tokens: 100
   refusal_classifier_model: "natong19/refusal_classifier"
   output_csv_path: "alignment_eval_results.csv"
