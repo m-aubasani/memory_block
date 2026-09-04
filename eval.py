@@ -1,5 +1,6 @@
 import torch
 import pandas as pd
+import wandb
 from datasets import load_dataset
 from tqdm import tqdm
 # from inference import InjectedGenerator
@@ -96,6 +97,25 @@ def run_evaluation(
     # Save to CSV for manual review or passing to an LLM-Judge later
     df.to_csv(output_path, index=False)
     print(f"Saved detailed outputs to '{output_path}'")
+
+    # Log evaluation results to Weights & Biases if active
+    if wandb.run is not None:
+        eval_metrics = {
+            "eval/baseline_refusal_rate": base_score,
+            "eval/sysprompt_refusal_rate": sys_score,
+            "eval/injected_refusal_rate": inj_score,
+            "eval/delta_inj_vs_base": inj_score - base_score,
+            "eval/delta_inj_vs_sys": inj_score - sys_score,
+            "eval/num_samples": len(df),
+            "eval/results_table": wandb.Table(dataframe=df),
+        }
+        wandb.log(eval_metrics)
+
+        # Update summary for easy dashboard sorting/filtering
+        wandb.run.summary["eval_baseline_refusal_rate"] = base_score
+        wandb.run.summary["eval_sysprompt_refusal_rate"] = sys_score
+        wandb.run.summary["eval_injected_refusal_rate"] = inj_score
+    
 
 # Run it
 # run_evaluation(model, tokenizer, generator, num_samples=50)

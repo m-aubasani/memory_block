@@ -29,3 +29,14 @@ evaluation:
   max_new_tokens: 100
   refusal_classifier_model: "natong19/refusal_classifier"
   output_csv_path: "alignment_eval_results.csv"
+
+wandb:
+  enabled: true
+  project: "memory-block-alignment"
+  entity: "mr_letters-personal"
+  run_name: null
+  mode: "online" # options: "online", "offline", "disabled"
+  tags:
+    - "axiomatic-injection"
+    - "ai-alignment"
+
