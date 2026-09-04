@@ -10,4 +10,5 @@ dependencies = [
     "pyyaml>=6.0",
     "torch>=2.13.0",
     "transformers>=5.16.1",
+    "wandb>=0.29.0",
 ]

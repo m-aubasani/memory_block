@@ -1,6 +1,7 @@
 import argparse
 import yaml
 import torch
+import gc
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -115,6 +116,13 @@ def main():
         epochs=train_cfg.get("epochs", 1),
         log_interval=train_cfg.get("log_interval", 20),
     )
+
+    print("\n--- Clearing VRAM for Evaluation ---")                                                                                   
+    del optimizer                                                                                                                     
+    del train_loader                                                                                                                  
+    del train_dataset                                                                                                                 
+    gc.collect()                                                                                                                      
+    torch.cuda.empty_cache()  
 
     # 5. EVALUATION PHASE
     print("\n--- Starting Evaluation Phase ---")
