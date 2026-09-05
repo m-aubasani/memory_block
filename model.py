@@ -20,13 +20,17 @@ class GatedCrossAttention(nn.Module):
 class ConstraintEncoder(nn.Module):
     def __init__(self, hidden_size, num_layers=2, num_heads=8):
         super().__init__()
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size, nhead=num_heads, dim_feedforward=hidden_size * 4, batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.num_layers = num_layers
+        if num_layers > 0:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_size, nhead=num_heads, dim_feedforward=hidden_size * 4, batch_first=True
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        else:
+            self.transformer = nn.Identity()
 
     def forward(self, memory_hidden_states):
-        # The input is now the rich tensor from the base LLM's Layer K
+        # Passes directly through when num_layers == 0
         return self.transformer(memory_hidden_states)
 
 
@@ -51,6 +55,8 @@ class AlignedInjectedLLM(nn.Module):
                 self.layer_pairs = [(extraction_layers, injection_layers)]
             elif isinstance(extraction_layers, int) and isinstance(injection_layers, list):
                 self.layer_pairs = [(extraction_layers, inj) for inj in injection_layers]
+            elif isinstance(extraction_layers, list) and isinstance(injection_layers, int):
+                self.layer_pairs = [(ext, injection_layers) for ext in extraction_layers]
             elif isinstance(extraction_layers, list) and isinstance(injection_layers, list):
                 assert len(extraction_layers) == len(injection_layers), (
                     f"extraction_layers (len {len(extraction_layers)}) and injection_layers "

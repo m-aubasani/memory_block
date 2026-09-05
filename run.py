@@ -122,6 +122,11 @@ def main():
         ])
 
         # 4. TRAINING PHASE
+        # Sanity check 
+        print("\n--- Sanity Check of Trainable Parameters ---")
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
         print("\n--- Starting Training Phase ---")
         train_model(
             model=model, 

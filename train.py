@@ -1,7 +1,8 @@
 import torch
 import wandb
+from model import AlignedInjectedLLM
 
-def train_model(model, dataloader, optimizer, device, epochs, log_interval=20):
+def train_model(model: AlignedInjectedLLM, dataloader, optimizer, device, epochs, log_interval=20):
     model.train()
     print("🚀 Starting Out-of-Band Alignment Training...")
 
@@ -58,6 +59,7 @@ def train_model(model, dataloader, optimizer, device, epochs, log_interval=20):
                     }
                     for L, m in model.injection_modules.items():
                         log_dict[f"train/gate_val_L{L}"] = torch.sigmoid(m.gate).item()
+                        log_dict[f"train/gate_raw_L{L}"] = m.gate.item()
                         if m.gate.grad is not None:
                             log_dict[f"train/gate_grad_L{L}"] = m.gate.grad.item()
 
