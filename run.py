@@ -104,6 +104,13 @@ def main():
             max_memory_length=data_cfg.get("max_memory_length", 128),
             constitution_path=data_cfg.get("constitution_path", "constitution.txt"),
             dataset_name=data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF"),
+            filter_refusal_only=data_cfg.get("filter_refusal_only", False),
+            refusal_model_name=data_cfg.get(
+                "refusal_classifier_model",
+                eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier"),
+            ),
+            refusal_filter_batch_size=data_cfg.get("refusal_filter_batch_size", 64),
+            device=device,
         )
         train_loader = DataLoader(
             train_dataset,

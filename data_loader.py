@@ -1,6 +1,7 @@
 import torch
 from torch.utils.data import Dataset
 from datasets import load_dataset
+from refusal_checker import RefusalChecker
 
 class AlignmentDataset(Dataset):
     def __init__(
@@ -12,6 +13,10 @@ class AlignmentDataset(Dataset):
         max_memory_length=128,
         constitution_path="constitution.txt",
         dataset_name="PKU-Alignment/PKU-SafeRLHF",
+        filter_refusal_only=False,
+        refusal_model_name="natong19/refusal_classifier",
+        refusal_filter_batch_size=64,
+        device=None,
     ):
         print(f"Loading {dataset_name} dataset ({split} split)...")
         self.dataset = load_dataset(dataset_name, split=split)
@@ -22,6 +27,28 @@ class AlignmentDataset(Dataset):
             self.dataset = self.dataset.filter(
                 lambda x: x['is_response_0_safe'] != x['is_response_1_safe']
             )
+
+            # Optional refusal filtering: Evaluate safe response with RefusalChecker and keep only refusals
+            if filter_refusal_only:
+                print("Evaluating and filtering dataset to retain ONLY safe responses that are explicit refusals...")
+                checker = RefusalChecker(model_name=refusal_model_name, device=device)
+
+                def filter_refusal_fn(batch):
+                    safe_texts = []
+                    safer_ids = batch.get("safer_response_id", batch.get("safe_response_id", [0] * len(batch["response_0"])))
+                    for safer_id, r0, r1 in zip(safer_ids, batch["response_0"], batch["response_1"]):
+                        safe_texts.append(r0 if safer_id == 0 else r1)
+                    return checker.is_refusal(safe_texts)
+
+                self.dataset = self.dataset.filter(
+                    filter_refusal_fn, batched=True, batch_size=refusal_filter_batch_size
+                )
+                print(f"Refusal filter complete: {len(self.dataset)} refusal samples available.")
+
+                # Free classifier VRAM
+                del checker
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         else:
             # Eval: At least one response is unsafe
             self.dataset = self.dataset.filter(

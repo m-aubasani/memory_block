@@ -16,6 +16,8 @@ data:
   train_max_samples: 2000
   max_seq_length: 256
   max_memory_length: 128
+  filter_refusal_only: true # optional: only train on safe responses that are explicit refusals
+  refusal_filter_batch_size: 64 # batch size for refusal check filtering
 
 training:
   batch_size: 8
