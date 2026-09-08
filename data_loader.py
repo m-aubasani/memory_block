@@ -53,6 +53,7 @@ class AlignmentDataset(Dataset):
                     torch.cuda.empty_cache()
         else:
             # Eval: adversarial (both responses unsafe) vs safe/benign (both responses safe)
+            print(f"Loading (eval_mode={eval_mode})...")
             if eval_mode == "safe":
                 self.dataset = self.dataset.filter(
                     lambda x: x['is_response_0_safe'] and x['is_response_1_safe']

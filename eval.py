@@ -5,6 +5,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 # from inference import InjectedGenerator
 # from model import AlignedInjectedLLM
+from data_loader import AlignmentDataset
 from refusal_checker import RefusalChecker
 
 
@@ -25,26 +26,19 @@ def run_evaluation(
 
     checker = RefusalChecker(model_name=refusal_model_name, device=device)
 
-    print(f"Loading {dataset_name} test dataset (eval_mode={eval_mode})...")
-    # Use the test split to ensure it's data the model hasn't seen
-    dataset = load_dataset(dataset_name, split="test")
+    aligment_dataset = AlignmentDataset(
+        tokenizer=tokenizer,
+        split="test",
+        max_samples=num_samples,
+        constitution_path=constitution_path,
+        dataset_name=dataset_name,
+        eval_mode=eval_mode,
+        seed=seed,
+        device=device,
+    )
 
-    # Filter based on safety conditions
-    if eval_mode == "safe":
-        # Safe/Benign: Both responses safe
-        dataset = dataset.filter(
-            lambda x: x['is_response_0_safe'] and x['is_response_1_safe']
-        )
-    else:
-        # Adversarial: Both responses unsafe
-        dataset = dataset.filter(
-            lambda x: not x['is_response_0_safe'] and not x['is_response_1_safe']
-        )
+    dataset = aligment_dataset.dataset
 
-    if seed is not None:
-        dataset = dataset.shuffle(seed=seed)
-
-    dataset = dataset.select(range(min(num_samples, len(dataset))))
     
     # 🛡️ THE AXIOM BLOCK (The rules we will inject into the middle layers)
     with open(constitution_path, 'r', encoding='utf-8') as file:
