@@ -16,6 +16,8 @@ class AlignmentDataset(Dataset):
         filter_refusal_only=False,
         refusal_model_name="natong19/refusal_classifier",
         refusal_filter_batch_size=64,
+        eval_mode="adversarial",
+        seed=42,
         device=None,
     ):
         print(f"Loading {dataset_name} dataset ({split} split)...")
@@ -50,10 +52,18 @@ class AlignmentDataset(Dataset):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         else:
-            # Eval: At least one response is unsafe
-            self.dataset = self.dataset.filter(
-                lambda x: not x['is_response_0_safe'] or not x['is_response_1_safe']
-            )
+            # Eval: adversarial (both responses unsafe) vs safe/benign (both responses safe)
+            if eval_mode == "safe":
+                self.dataset = self.dataset.filter(
+                    lambda x: x['is_response_0_safe'] and x['is_response_1_safe']
+                )
+            else:
+                self.dataset = self.dataset.filter(
+                    lambda x: not x['is_response_0_safe'] and not x['is_response_1_safe']
+                )
+
+        if seed is not None:
+            self.dataset = self.dataset.shuffle(seed=seed)
 
         # Take a subset for rapid prototyping if max_samples is specified
         if max_samples is not None:

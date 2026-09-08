@@ -4,7 +4,7 @@ import torch
 import gc
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 
 # Import your custom modules
 from data_loader import AlignmentDataset
@@ -36,6 +36,10 @@ def main():
     eval_cfg = config.get("evaluation", {})
     wandb_cfg = config.get("wandb", {})
 
+    # Set random seed for reproducibility
+    seed = config.get("seed", data_cfg.get("seed", eval_cfg.get("seed", 42)))
+    set_seed(seed)
+
     # Initialize Weights & Biases if enabled
     use_wandb = wandb_cfg.get("enabled", True)
     if use_wandb:
@@ -63,6 +67,7 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"--- Initialization ---")
         print(f"Using Device: {device}")
+        print(f"Using Seed: {seed}")
         
         model_name = model_cfg.get("name", "Qwen/Qwen2.5-1.5B-Instruct")
         tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -110,6 +115,7 @@ def main():
                 eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier"),
             ),
             refusal_filter_batch_size=data_cfg.get("refusal_filter_batch_size", 64),
+            seed=seed,
             device=device,
         )
         train_loader = DataLoader(
@@ -156,20 +162,47 @@ def main():
         model.eval()
         generator = InjectedGenerator(model)
         
-        output_csv = eval_cfg.get("output_csv_path", "alignment_eval_results.csv")
+        num_eval_samples = eval_cfg.get("num_samples", 20)
+        max_new_tokens = eval_cfg.get("max_new_tokens", 100)
+        constitution_path = data_cfg.get("constitution_path", "constitution.txt")
+        dataset_name = data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF")
+        refusal_model_name = eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier")
+
+        # 5.1 Adversarial Evaluation (both responses unsafe)
+        print("\n[1/2] Running Adversarial Evaluation (both responses unsafe)...")
+        adv_output_csv = eval_cfg.get("output_adversarial_csv_path", eval_cfg.get("output_csv_path", "alignment_eval_adversarial_results.csv"))
         run_evaluation(
             model=model, 
             tokenizer=tokenizer, 
             generator=generator, 
-            num_samples=eval_cfg.get("num_samples", 20),
-            max_new_tokens=eval_cfg.get("max_new_tokens", 100),
-            constitution_path=data_cfg.get("constitution_path", "constitution.txt"),
-            dataset_name=data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF"),
-            refusal_model_name=eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier"),
-            output_path=output_csv,
+            num_samples=num_eval_samples,
+            max_new_tokens=max_new_tokens,
+            constitution_path=constitution_path,
+            dataset_name=dataset_name,
+            refusal_model_name=refusal_model_name,
+            output_path=adv_output_csv,
+            eval_mode="adversarial",
+            seed=seed,
+        )
+
+        # 5.2 Safe/Benign Evaluation (both responses safe)
+        print("\n[2/2] Running Safe/Benign Evaluation (both responses safe)...")
+        safe_output_csv = eval_cfg.get("output_safe_csv_path", "alignment_eval_safe_results.csv")
+        run_evaluation(
+            model=model, 
+            tokenizer=tokenizer, 
+            generator=generator, 
+            num_samples=num_eval_samples,
+            max_new_tokens=max_new_tokens,
+            constitution_path=constitution_path,
+            dataset_name=dataset_name,
+            refusal_model_name=refusal_model_name,
+            output_path=safe_output_csv,
+            eval_mode="safe",
+            seed=seed,
         )
         
-        print(f"\n🎉 Pipeline Complete! Check '{output_csv}' for details.")
+        print(f"\n🎉 Pipeline Complete! Check '{adv_output_csv}' and '{safe_output_csv}' for details.")
 
     finally:
         if use_wandb:

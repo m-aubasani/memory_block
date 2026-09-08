@@ -18,14 +18,33 @@ def run_evaluation(
     dataset_name="PKU-Alignment/PKU-SafeRLHF",
     refusal_model_name="natong19/refusal_classifier",
     output_path="alignment_eval_results.csv",
+    eval_mode="adversarial",
+    seed=42,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     checker = RefusalChecker(model_name=refusal_model_name, device=device)
 
-    print(f"Loading {dataset_name} test dataset...")
+    print(f"Loading {dataset_name} test dataset (eval_mode={eval_mode})...")
     # Use the test split to ensure it's data the model hasn't seen
-    dataset = load_dataset(dataset_name, split="test").select(range(num_samples))
+    dataset = load_dataset(dataset_name, split="test")
+
+    # Filter based on safety conditions
+    if eval_mode == "safe":
+        # Safe/Benign: Both responses safe
+        dataset = dataset.filter(
+            lambda x: x['is_response_0_safe'] and x['is_response_1_safe']
+        )
+    else:
+        # Adversarial: Both responses unsafe
+        dataset = dataset.filter(
+            lambda x: not x['is_response_0_safe'] and not x['is_response_1_safe']
+        )
+
+    if seed is not None:
+        dataset = dataset.shuffle(seed=seed)
+
+    dataset = dataset.select(range(min(num_samples, len(dataset))))
     
     # 🛡️ THE AXIOM BLOCK (The rules we will inject into the middle layers)
     with open(constitution_path, 'r', encoding='utf-8') as file:
@@ -34,7 +53,8 @@ def run_evaluation(
     
     results = []
     
-    print(f"Evaluating {num_samples} adversarial prompts...")
+    mode_label = "Adversarial" if eval_mode != "safe" else "Safe/Benign"
+    print(f"Evaluating {len(dataset)} {mode_label.lower()} prompts...")
     for item in tqdm(dataset):
         user_prompt = item['prompt']
         
@@ -86,13 +106,13 @@ def run_evaluation(
     sys_score = df["SysPrompt_Refused"].mean() * 100
     inj_score = df["Injected_Refused"].mean() * 100
     
-    print("\n" + "="*40)
-    print("🎯 EVALUATION RESULTS (Refusal Rate %)")
-    print("="*40)
+    print("\n" + "="*45)
+    print(f"🎯 {mode_label.upper()} EVALUATION RESULTS (Refusal Rate %)")
+    print("="*45)
     print(f"1. Baseline (No Protection): {base_score:.1f}%")
     print(f"2. Traditional (System Prompt): {sys_score:.1f}%")
     print(f"3. Axiomatic Injection (Ours): {inj_score:.1f}%")
-    print("="*40)
+    print("="*45)
     
     # Save to CSV for manual review or passing to an LLM-Judge later
     df.to_csv(output_path, index=False)
@@ -100,21 +120,24 @@ def run_evaluation(
 
     # Log evaluation results to Weights & Biases if active
     if wandb.run is not None:
+        prefix = f"eval_{eval_mode}"
         eval_metrics = {
-            "eval/baseline_refusal_rate": base_score,
-            "eval/sysprompt_refusal_rate": sys_score,
-            "eval/injected_refusal_rate": inj_score,
-            "eval/delta_inj_vs_base": inj_score - base_score,
-            "eval/delta_inj_vs_sys": inj_score - sys_score,
-            "eval/num_samples": len(df),
-            "eval/results_table": wandb.Table(dataframe=df),
+            f"{prefix}/baseline_refusal_rate": base_score,
+            f"{prefix}/sysprompt_refusal_rate": sys_score,
+            f"{prefix}/injected_refusal_rate": inj_score,
+            f"{prefix}/delta_inj_vs_base": inj_score - base_score,
+            f"{prefix}/delta_inj_vs_sys": inj_score - sys_score,
+            f"{prefix}/num_samples": len(df),
+            f"{prefix}/results_table": wandb.Table(dataframe=df),
         }
         wandb.log(eval_metrics)
 
         # Update summary for easy dashboard sorting/filtering
-        wandb.run.summary["eval_baseline_refusal_rate"] = base_score
-        wandb.run.summary["eval_sysprompt_refusal_rate"] = sys_score
-        wandb.run.summary["eval_injected_refusal_rate"] = inj_score
+        wandb.run.summary[f"{prefix}_baseline_refusal_rate"] = base_score
+        wandb.run.summary[f"{prefix}_sysprompt_refusal_rate"] = sys_score
+        wandb.run.summary[f"{prefix}_injected_refusal_rate"] = inj_score
+
+    return df
     
 
 # Run it

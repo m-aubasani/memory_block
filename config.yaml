@@ -16,6 +16,7 @@ data:
   train_max_samples: 2000
   max_seq_length: 256
   max_memory_length: 128
+  seed: 42
   filter_refusal_only: true # optional: only train on safe responses that are explicit refusals
   refusal_filter_batch_size: 64 # batch size for refusal check filtering
 
@@ -29,8 +30,10 @@ training:
 evaluation:
   num_samples: 50
   max_new_tokens: 100
+  seed: 42
   refusal_classifier_model: "natong19/refusal_classifier"
-  output_csv_path: "alignment_eval_results.csv"
+  output_adversarial_csv_path: "alignment_eval_adversarial_results.csv"
+  output_safe_csv_path: "alignment_eval_safe_results.csv"
 
 wandb:
   enabled: true
