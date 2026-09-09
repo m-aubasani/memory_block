@@ -6,3 +6,4 @@ pandas
 tqdm
 pyyaml
 wandb
+gliner2[local]
