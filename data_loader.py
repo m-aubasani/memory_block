@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from datasets import load_dataset
 from refusal_checker import RefusalChecker
+from gliguard_checker import GLiGuardChecker
 
 class AlignmentDataset(Dataset):
     def __init__(
@@ -17,6 +18,9 @@ class AlignmentDataset(Dataset):
         refusal_model_name="natong19/refusal_classifier",
         refusal_filter_batch_size=64,
         eval_mode="adversarial",
+        filter_eval_with_guard=True,
+        guard_model_name="fastino/gliguard-LLMGuardrails-300M",
+        guard_filter_batch_size=64,
         seed=42,
         device=None,
     ):
@@ -63,10 +67,38 @@ class AlignmentDataset(Dataset):
                     lambda x: not x['is_response_0_safe'] and not x['is_response_1_safe']
                 )
 
-        if seed is not None:
+            # Pre-shuffle and select candidate pool if max_samples is provided to speed up evaluation filtering
+            if max_samples is not None:
+                if seed is not None:
+                    self.dataset = self.dataset.shuffle(seed=seed)
+                candidate_limit = min(len(self.dataset), max_samples * 4)
+                self.dataset = self.dataset.select(range(candidate_limit))
+
+            # Filter input prompts using GLiGuard
+            if filter_eval_with_guard:
+                print(f"Filtering input prompts using GLiGuard ({guard_model_name}) for eval_mode='{eval_mode}'...")
+                guard = GLiGuardChecker(model_name=guard_model_name, device=device)
+
+                def filter_guard_prompt_fn(batch):
+                    prompts = batch["prompt"]
+                    if eval_mode == "safe":
+                        return guard.is_prompt_safe(prompts, batch_size=guard_filter_batch_size)
+                    else:
+                        return guard.is_prompt_unsafe(prompts, batch_size=guard_filter_batch_size)
+
+                self.dataset = self.dataset.filter(
+                    filter_guard_prompt_fn, batched=True, batch_size=guard_filter_batch_size
+                )
+                print(f"GLiGuard prompt filtering complete: {len(self.dataset)} samples retained.")
+
+                del guard
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        if seed is not None and split == "train":
             self.dataset = self.dataset.shuffle(seed=seed)
 
-        # Take a subset for rapid prototyping if max_samples is specified
+        # Take a subset if max_samples is specified
         if max_samples is not None:
             self.dataset = self.dataset.select(range(min(max_samples, len(self.dataset))))
         self.tokenizer = tokenizer

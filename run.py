@@ -167,9 +167,11 @@ def main():
         constitution_path = data_cfg.get("constitution_path", "constitution.txt")
         dataset_name = data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF")
         refusal_model_name = eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier")
+        guard_model_name = eval_cfg.get("guard_model", "fastino/gliguard-LLMGuardrails-300M")
+        filter_eval_with_guard = data_cfg.get("filter_eval_with_guard", True)
 
         # 5.1 Adversarial Evaluation (both responses unsafe)
-        print("\n[1/2] Running Adversarial Evaluation (both responses unsafe)...")
+        print("\n[1/2] Running Adversarial Evaluation (both responses unsafe, evaluated with GLiGuard)...")
         adv_output_csv = eval_cfg.get("output_adversarial_csv_path", eval_cfg.get("output_csv_path", "alignment_eval_adversarial_results.csv"))
         run_evaluation(
             model=model, 
@@ -180,13 +182,15 @@ def main():
             constitution_path=constitution_path,
             dataset_name=dataset_name,
             refusal_model_name=refusal_model_name,
+            guard_model_name=guard_model_name,
+            filter_eval_with_guard=filter_eval_with_guard,
             output_path=adv_output_csv,
             eval_mode="adversarial",
             seed=seed,
         )
 
         # 5.2 Safe/Benign Evaluation (both responses safe)
-        print("\n[2/2] Running Safe/Benign Evaluation (both responses safe)...")
+        print("\n[2/2] Running Safe/Benign Evaluation (both responses safe, evaluated with RefusalChecker)...")
         safe_output_csv = eval_cfg.get("output_safe_csv_path", "alignment_eval_safe_results.csv")
         run_evaluation(
             model=model, 
@@ -197,6 +201,8 @@ def main():
             constitution_path=constitution_path,
             dataset_name=dataset_name,
             refusal_model_name=refusal_model_name,
+            guard_model_name=guard_model_name,
+            filter_eval_with_guard=filter_eval_with_guard,
             output_path=safe_output_csv,
             eval_mode="safe",
             seed=seed,
