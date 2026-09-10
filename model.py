@@ -11,6 +11,8 @@ class GatedCrossAttention(nn.Module):
         self.gate = nn.Parameter(torch.tensor([-4.0]))
 
     def forward(self, hidden_states, memory_states):
+        if memory_states.size(0) != hidden_states.size(0):
+            memory_states = memory_states.expand(hidden_states.size(0), -1, -1)
         attn_output, _ = self.cross_attn(
             query=hidden_states, key=memory_states, value=memory_states
         )

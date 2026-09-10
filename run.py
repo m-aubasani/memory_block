@@ -163,6 +163,7 @@ def main():
         generator = InjectedGenerator(model)
         
         num_eval_samples = eval_cfg.get("num_samples", 20)
+        eval_batch_size = eval_cfg.get("batch_size", 64)
         max_new_tokens = eval_cfg.get("max_new_tokens", 100)
         constitution_path = data_cfg.get("constitution_path", "constitution.txt")
         dataset_name = data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF")
@@ -178,6 +179,7 @@ def main():
             tokenizer=tokenizer, 
             generator=generator, 
             num_samples=num_eval_samples,
+            batch_size=eval_batch_size,
             max_new_tokens=max_new_tokens,
             constitution_path=constitution_path,
             dataset_name=dataset_name,
@@ -197,6 +199,7 @@ def main():
             tokenizer=tokenizer, 
             generator=generator, 
             num_samples=num_eval_samples,
+            batch_size=eval_batch_size,
             max_new_tokens=max_new_tokens,
             constitution_path=constitution_path,
             dataset_name=dataset_name,

@@ -1,23 +1,21 @@
 model:
   name: "Qwen/Qwen2.5-1.5B-Instruct"
   extraction_layers:
-    - 10
-    - 18
+    - 14
   injection_layers:
-    - 10
-    - 18
-  num_encoder_layers: 2
+    - 14
+  num_encoder_layers: 0
   num_heads: 8
   dtype: "bfloat16"
 
 data:
   dataset_name: "PKU-Alignment/PKU-SafeRLHF"
   constitution_path: "constitution.txt"
-  train_max_samples: 2000
+  train_max_samples: 4000
   max_seq_length: 256
   max_memory_length: 128
   seed: 42
-  filter_refusal_only: true # optional: only train on safe responses that are explicit refusals
+  filter_refusal_only: false # optional: only train on safe responses that are explicit refusals
   refusal_filter_batch_size: 64 # batch size for refusal check filtering
   filter_eval_with_guard: true # filter evaluation input prompts with GLiGuard
   guard_filter_batch_size: 64
@@ -25,12 +23,13 @@ data:
 training:
   batch_size: 8
   learning_rate: 0.0003
-  gate_learning_rate: 0.03
-  epochs: 1
-  log_interval: 50
+  gate_learning_rate: 0.0003
+  epochs: 2
+  log_interval: 20
 
 evaluation:
-  num_samples: 50
+  num_samples: 1000
+  batch_size: 64
   max_new_tokens: 100
   seed: 42
   refusal_classifier_model: "natong19/refusal_classifier"
@@ -42,7 +41,7 @@ wandb:
   enabled: true
   project: "memory-block-alignment"
   entity: "mr_letters-personal"
-  run_name: null
+  run_name: "encd-0-ex-14-inj-14-exp"
   mode: "online" # options: "online", "offline", "disabled"
   tags:
     - "axiomatic-injection"
