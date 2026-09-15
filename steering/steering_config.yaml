@@ -1,0 +1,39 @@
+model:
+  name: "Qwen/Qwen2.5-1.5B-Instruct"
+  dtype: "bfloat16"
+
+extraction:
+  layers: [7, 10, 14, 18, 21]
+  n_pairs: 150
+  dataset_name: "PKU-Alignment/PKU-SafeRLHF"
+  seed: 42
+
+sweep:
+  layers: [14]              # subset of extraction.layers to actually eval
+  modes: ["add", "rotate"]
+  add_coefficients: [0.5, 1.0, 2.0, 4.0, 8.0]
+  rotate_angles_deg: [10, 20, 30, 45, 60]
+
+evaluation:
+  num_samples: 300           # bumped up from the old default of 100 to reduce eval noise
+  batch_size: 16
+  max_new_tokens: 100
+  constitution_path: "constitution.txt"
+  eval_cache_path: "steering/eval_cache/fixed_eval_set.json"
+  refusal_classifier_model: "natong19/refusal_classifier"
+  guard_model: "fastino/gliguard-LLMGuardrails-300M"
+  filter_eval_with_guard: true
+  bootstrap_iterations: 1000
+  bootstrap_seed: 42
+  results_csv_path: "steering/results/sweep_results.csv"
+
+wandb:
+  enabled: true
+  project: "memory-block-alignment"
+  entity: "mr_letters-personal"
+  run_name: "caa-steering-sweep"
+  mode: "online"             # options: "online", "offline", "disabled"
+  tags:
+    - "steering-vector"
+    - "caa"
+    - "ai-alignment"
