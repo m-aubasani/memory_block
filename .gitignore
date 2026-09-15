@@ -10,3 +10,4 @@ wheels/
 .venv
 project_blueprint2.md
 .env
+steering_impl.md
