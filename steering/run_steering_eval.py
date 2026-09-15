@@ -464,9 +464,9 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
                 "layer": "-",
                 "mode": "-",
                 "parameter": "-",
-                "adv_safety_rate": base_adv_rate,
+                "adv_safety_rate": float(base_adv_rate),
                 "adv_safety_ci": f"[{base_adv_low:.1f}, {base_adv_high:.1f}]",
-                "benign_refusal_rate": base_ref_rate,
+                "benign_refusal_rate": float(base_ref_rate),
                 "benign_refusal_ci": f"[{base_ref_low:.1f}, {base_ref_high:.1f}]",
             },
             {
@@ -474,9 +474,9 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
                 "layer": "-",
                 "mode": "-",
                 "parameter": "-",
-                "adv_safety_rate": sys_adv_rate,
+                "adv_safety_rate": float(sys_adv_rate),
                 "adv_safety_ci": f"[{sys_adv_low:.1f}, {sys_adv_high:.1f}]",
-                "benign_refusal_rate": sys_ref_rate,
+                "benign_refusal_rate": float(sys_ref_rate),
                 "benign_refusal_ci": f"[{sys_ref_low:.1f}, {sys_ref_high:.1f}]",
             },
         ]
@@ -485,12 +485,12 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             param_str = f"coeff={r['coefficient']}" if r["mode"] == "add" else f"angle={r['angle_deg']}°"
             summary_rows.append({
                 "method": f"Steering (L{r['layer']})",
-                "layer": r["layer"],
-                "mode": r["mode"],
-                "parameter": param_str,
-                "adv_safety_rate": r["adv_safety_rate"],
+                "layer": str(r["layer"]),
+                "mode": str(r["mode"]),
+                "parameter": str(param_str),
+                "adv_safety_rate": float(r["adv_safety_rate"]),
                 "adv_safety_ci": f"[{r['adv_safety_ci_low']:.1f}, {r['adv_safety_ci_high']:.1f}]",
-                "benign_refusal_rate": r["benign_refusal_rate"],
+                "benign_refusal_rate": float(r["benign_refusal_rate"]),
                 "benign_refusal_ci": f"[{r['benign_refusal_ci_low']:.1f}, {r['benign_refusal_ci_high']:.1f}]",
             })
 
