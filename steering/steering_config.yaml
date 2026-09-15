@@ -16,7 +16,7 @@ sweep:
 
 evaluation:
   num_samples: 300           # bumped up from the old default of 100 to reduce eval noise
-  batch_size: 16
+  batch_size: 64
   max_new_tokens: 100
   constitution_path: "constitution.txt"
   eval_cache_path: "steering/eval_cache/fixed_eval_set.json"
@@ -29,7 +29,7 @@ evaluation:
 
 wandb:
   enabled: true
-  project: "memory-block-alignment"
+  project: "memory-block-alignment-caa"
   entity: "mr_letters-personal"
   run_name: "caa-steering-sweep"
   mode: "online"             # options: "online", "offline", "disabled"

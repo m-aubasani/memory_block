@@ -48,12 +48,16 @@ class SteeredGenerator:
         Generates text using the base model with steering hooks attached.
         """
         with self.steering_context():
-            if hasattr(self.base_model, "base_model"):
+            if callable(getattr(self.base_model, "generate", None)):
+                target = self.base_model
+            elif hasattr(self.base_model, "base_model") and callable(getattr(self.base_model.base_model, "generate", None)):
                 target = self.base_model.base_model
             else:
-                target = self.base_model
+                raise AttributeError(f"Model of type {type(self.base_model)} does not have a callable generate method.")
+
             return target.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 **kwargs
             )
+
