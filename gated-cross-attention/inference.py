@@ -1,6 +1,15 @@
+import os
+import sys
 import torch
 from contextlib import contextmanager
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+for p in [PROJECT_ROOT, CURRENT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 from model import AlignedInjectedLLM
 
 
@@ -98,7 +107,8 @@ if __name__ == "__main__":
 
     generator = InjectedGenerator(model)
     # Define Inputs
-    with open('constitution.txt', 'r', encoding='utf-8') as file:
+    constitution_path = os.path.join(PROJECT_ROOT, 'constitution.txt') if os.path.exists(os.path.join(PROJECT_ROOT, 'constitution.txt')) else 'constitution.txt'
+    with open(constitution_path, 'r', encoding='utf-8') as file:
         constitution = file.read()
     memory_ids = tokenizer(constitution, return_tensors="pt").input_ids.to(device)
 

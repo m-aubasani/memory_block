@@ -1,3 +1,5 @@
+import os
+import sys
 import argparse
 import yaml
 import torch
@@ -6,25 +8,37 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 
-# Import your custom modules
+# Ensure project root and current dir are in sys.path
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+for p in [PROJECT_ROOT, CURRENT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+# Import root modules and local modules
 from data_loader import AlignmentDataset
+from eval import run_evaluation
 from model import AlignedInjectedLLM
 from train import train_model
 from inference import InjectedGenerator
-from eval import run_evaluation
 
 
 def load_config(config_path="config.yaml"):
+    if not os.path.exists(config_path):
+        fallback = os.path.join(CURRENT_DIR, "config.yaml")
+        if os.path.exists(fallback):
+            config_path = fallback
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Alignment Injection Pipeline")
+    default_config = os.path.join(CURRENT_DIR, "config.yaml") if os.path.exists(os.path.join(CURRENT_DIR, "config.yaml")) else "config.yaml"
+    parser = argparse.ArgumentParser(description="Run Alignment Injection Pipeline (Gated Cross-Attention)")
     parser.add_argument(
         "--config",
         type=str,
-        default="config.yaml",
+        default=default_config,
         help="Path to YAML configuration file",
     )
     args = parser.parse_args()
@@ -99,6 +113,13 @@ def main():
         for param in model.injection_modules.parameters(): 
             param.requires_grad = True
 
+        # Resolve constitution path
+        constitution_path = data_cfg.get("constitution_path", "constitution.txt")
+        if not os.path.exists(constitution_path):
+            fallback_constitution = os.path.join(PROJECT_ROOT, constitution_path)
+            if os.path.exists(fallback_constitution):
+                constitution_path = fallback_constitution
+
         # 3. PREPARE DATASET
         print("\n--- Preparing Data ---")
         train_dataset = AlignmentDataset(
@@ -107,7 +128,7 @@ def main():
             max_samples=data_cfg.get("train_max_samples", 500),
             max_length=data_cfg.get("max_seq_length", 256),
             max_memory_length=data_cfg.get("max_memory_length", 128),
-            constitution_path=data_cfg.get("constitution_path", "constitution.txt"),
+            constitution_path=constitution_path,
             dataset_name=data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF"),
             filter_refusal_only=data_cfg.get("filter_refusal_only", False),
             refusal_model_name=data_cfg.get(
@@ -165,7 +186,6 @@ def main():
         num_eval_samples = eval_cfg.get("num_samples", 20)
         eval_batch_size = eval_cfg.get("batch_size", 64)
         max_new_tokens = eval_cfg.get("max_new_tokens", 100)
-        constitution_path = data_cfg.get("constitution_path", "constitution.txt")
         dataset_name = data_cfg.get("dataset_name", "PKU-Alignment/PKU-SafeRLHF")
         refusal_model_name = eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier")
         guard_model_name = eval_cfg.get("guard_model", "fastino/gliguard-LLMGuardrails-300M")
