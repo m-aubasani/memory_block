@@ -1,70 +1,84 @@
 # CAA Steering Vectors for Safety Alignment
 
-This module implements inference-time safety alignment via Contrastive Activation Addition (CAA) / difference-in-means steering vectors without requiring training loops or modifying base model weights.
+This module implements high-performance inference-time safety alignment via Contrastive Activation Addition (CAA) / difference-in-means steering vectors without requiring training loops or modifying base model weights.
 
 ---
 
-## Key Features
+## ⚡ Key Optimizations & Speedups
 
-1. **Difference-in-Means Vector Extraction (`extract_vector.py`)**:
-   - Extracts layer-wise mean activation differences between safe and unsafe responses:
-     $$\vec{v} = \mathbb{E}[h_{\text{safe}}] - \mathbb{E}[h_{\text{unsafe}}]$$
-   - Extracts at the last token position using full chat-templated conversations.
-   - Vectors point *toward* safety.
+1. **Generation-First Architecture**:
+   - Generates all completions across the entire sweep (Baseline, System Prompt, and all Steered configurations) in one continuous pass while the base model is loaded in VRAM.
+   - Then loads `GLiGuardChecker` and `RefusalChecker` **once** to batch-score all completions in bulk, eliminating repetitive model unloads and memory swaps.
 
-2. **Interchangeable Steering Modes (`steering_hook.py`)**:
-   - `add`: Plain CAA additive steering:
-     $$h_{\text{new}} = h + \text{coefficient} \cdot \vec{v}$$
-   - `rotate`: Norm-preserving spherical interpolation:
-     $$\hat{h} = \frac{h}{\|h\|_2}, \quad \hat{v} = \frac{\vec{v}}{\|\vec{v}\|_2}$$
-     $$h_{\text{rot}} = \hat{h} \cos(\theta) + \hat{v} \sin(\theta)$$
-     $$h_{\text{new}} = h_{\text{rot}} \cdot \|h\|_2$$
-   - **Numerical Precision**: Internal arithmetic is executed in `float32` before casting back to the model's native dtype (`bfloat16`) to prevent precision drift.
+2. **Length-Bucketed / Sorted Batching**:
+   - Sorts prompts by sequence length during batched generation to minimize left-padding overhead, before restoring original ordering.
 
-3. **Fixed Evaluation Set Caching & Efficiency**:
-   - Evaluates on a fixed prompt set cached at `steering/eval_cache/fixed_eval_set.json`.
-   - **Caching Approach**: We implemented a `steering/`-local evaluation loop (`run_steering_eval.py`) that loads from / populates the fixed JSON cache and calculates Baseline and System-Prompt responses **once**, sharing them across all sweep parameter configurations.
-   - Incorporates **1,000-iteration Bootstrap 95% Confidence Intervals** for both adversarial safety rates and benign over-refusal rates.
+3. **Inference & Attention Optimizations**:
+   - `attn_implementation="sdpa"` (PyTorch native Scaled Dot-Product Attention).
+   - Executed under `torch.inference_mode()` with `use_cache=True`.
+   - Batch size increased to `32` for generation and `64` for classification.
 
-4. **Weights & Biases (W&B) Logging**:
-   - Logs sweep progression, per-configuration safety & refusal rates, confidence intervals, and comparison deltas vs. Baseline and System Prompt.
-   - Automatically logs interactive `wandb.Table`s for `sweep_results.csv` and `summary_comparison.csv`.
+4. **Exploratory Sweep Mode**:
+   - `max_new_tokens: 40` default for parameter sweeps (sufficient to detect refusal vs. compliance in opening tokens).
 
 ---
 
-## Quickstart
+## 📊 Evaluation Datasets
+
+1. **Adversarial / Attack Benchmarks**:
+   - **`jailbreakbench`** (`JailbreakBench/JBB-Behaviors`, split="harmful", 100 behaviors): Curated adversarial jailbreak behaviors.
+   - **`harmbench`** (CAIS HarmBench standard, 400 behaviors): High-diversity automated red-teaming benchmark.
+   - **`pku`** (`PKU-Alignment/PKU-SafeRLHF` test split).
+
+2. **Benign Over-Refusal Benchmarks**:
+   - **`xstest`** (`Paul/XSTest`, 250 benign safe prompts with sensitive keywords like "kill a process").
+   - **`jailbreakbench`** (benign split, 100 prompts).
+   - **`pku`** (`PKU-Alignment/PKU-SafeRLHF` safe split).
+
+---
+
+## 🚀 Quickstart
 
 ### 1. Vector Extraction
 
-Extract steering vectors for target layers (e.g. 7, 10, 14, 18, 21):
+Extract difference-in-means steering vectors:
 
 ```bash
 uv run python steering/extract_vector.py --layers 7 10 14 18 21 --n-pairs 150
 ```
 
-Vectors are saved to `steering/vectors/layer_{L}.pt` along with `steering/vectors/metadata.json`.
-
-### 2. Parameter Sweep & Evaluation (with W&B)
-
-Run the evaluation sweep across modes (`add`, `rotate`) and parameter values on layer 14:
+### 2. Fast Parameter Sweep (JailbreakBench + XSTest)
 
 ```bash
 uv run python steering/run_steering_eval.py --config steering/steering_config.yaml
 ```
 
+### 3. Run on HarmBench
+
+```bash
+uv run python steering/run_steering_eval.py --adversarial-dataset harmbench
+```
+
+### 4. Run Full Evaluation on Both Benchmarks
+
+```bash
+uv run python steering/run_steering_eval.py --eval-all
+```
+
 Outputs:
-- Detailed metrics & CIs: `steering/results/sweep_results.csv`
-- Comparative summary: `steering/results/summary_comparison.csv`
-- W&B dashboard live updates with tables and metric curves.
+- CSV results: `steering/results/sweep_results_<dataset>.csv`
+- Comparative summary: `steering/results/summary_comparison_<dataset>.csv`
+- Live W&B dashboard tables, artifacts, and summary metrics.
 
 ---
 
-## Configuration (`steering_config.yaml`)
+## ⚙️ Configuration (`steering_config.yaml`)
 
 ```yaml
 model:
   name: "Qwen/Qwen2.5-1.5B-Instruct"
   dtype: "bfloat16"
+  attn_implementation: "sdpa"
 
 extraction:
   layers: [7, 10, 14, 18, 21]
@@ -79,23 +93,30 @@ sweep:
   rotate_angles_deg: [10, 20, 30, 45, 60]
 
 evaluation:
-  num_samples: 300
-  batch_size: 16
-  max_new_tokens: 100
-  eval_cache_path: "steering/eval_cache/fixed_eval_set.json"
+  adversarial_dataset: "jailbreakbench" # "jailbreakbench", "harmbench", or "pku"
+  benign_dataset: "xstest"              # "xstest", "jailbreakbench", or "pku"
+  batch_size: 32
+  classifier_batch_size: 64
+  max_new_tokens: 40                    # 40 for fast sweep, 100 for full text
+  constitution_path: "constitution.txt"
+  eval_cache_dir: "steering/eval_cache"
   refusal_classifier_model: "natong19/refusal_classifier"
   guard_model: "fastino/gliguard-LLMGuardrails-300M"
+  filter_eval_with_guard: false
   bootstrap_iterations: 1000
   bootstrap_seed: 42
+  results_csv_path: "steering/results/sweep_results.csv"
 
 wandb:
   enabled: true
   project: "memory-block-alignment"
   entity: "mr_letters-personal"
   run_name: "caa-steering-sweep"
-  mode: "online"             # options: "online", "offline", "disabled"
+  mode: "online"
   tags:
     - "steering-vector"
     - "caa"
-    - "ai-alignment"
+    - "jailbreakbench"
+    - "harmbench"
+    - "xstest"
 ```

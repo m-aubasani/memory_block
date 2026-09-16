@@ -9,6 +9,13 @@ from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 
+# Ensure UTF-8 stdout on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Ensure project root is in sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -49,7 +56,7 @@ def extract_steering_vectors(
     torch_dtype = dtype_map.get(dtype_str, torch.bfloat16)
 
     print(f"\n=======================================================")
-    print(f"🚀 EXTRACTING STEERING VECTORS (CAA / Difference-in-Means)")
+    print(f"[EXTRACT] CAA DIFFERENCE-IN-MEANS VECTOR EXTRACTION")
     print(f"=======================================================")
     print(f"Model:        {model_name} ({dtype_str})")
     print(f"Dataset:      {dataset_name} (train split)")
@@ -109,12 +116,19 @@ def extract_steering_vectors(
         safe_texts.append(safe_full)
         unsafe_texts.append(unsafe_full)
 
-    # 4. Load Base Model
+    # 4. Load Base Model with SDPA
     print(f"\nLoading base model '{model_name}'...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        dtype=torch_dtype,
-    ).to(device)
+    try:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch_dtype,
+            attn_implementation="sdpa",
+        ).to(device)
+    except Exception:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch_dtype,
+        ).to(device)
     base_model.eval()
 
     # 5. Extract activations per layer
@@ -132,23 +146,18 @@ def extract_steering_vectors(
                 max_length=512,
             ).to(device)
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 outputs = base_model(
                     input_ids=encodings.input_ids,
                     attention_mask=encodings.attention_mask,
                     output_hidden_states=True,
                 )
 
-            # Find last non-padded token position for each sequence in the batch
-            # For left-padded inputs, the last non-padded token is at index -1
-            # For general safety, compute last token position via attention_mask
+            # Find last non-padded token position
             for b_idx in range(len(batch)):
-                # In left-padded sequences, valid tokens end at index len - 1
                 last_pos = encodings.input_ids.shape[1] - 1
 
                 for layer_idx in layers:
-                    # In HuggingFace, hidden_states[0] is embedding output,
-                    # hidden_states[layer_idx + 1] is output of layer_idx
                     h_state = outputs.hidden_states[layer_idx + 1][b_idx, last_pos, :].detach().float().cpu()
                     act_dict[layer_idx].append(h_state)
 
@@ -182,7 +191,7 @@ def extract_steering_vectors(
         output_path = os.path.join(output_dir, f"layer_{layer_idx}.pt")
         torch.save(vector_data, output_path)
         saved_files.append(output_path)
-        print(f"  ✓ Layer {layer_idx:2d}: norm = {norm:.4f} -> saved to '{output_path}'")
+        print(f"  [OK] Layer {layer_idx:2d}: norm = {norm:.4f} -> saved to '{output_path}'")
 
     # 7. Save metadata
     metadata = {
@@ -198,7 +207,7 @@ def extract_steering_vectors(
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
     print(f"\nSaved extraction metadata to '{metadata_path}'")
-    print("✅ Vector extraction complete!\n")
+    print("[OK] Vector extraction complete!\n")
 
 
 def main():

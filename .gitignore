@@ -11,3 +11,5 @@ wheels/
 project_blueprint2.md
 .env
 steering_impl.md
+steering/new_feat.md
+steering/eval_cache/*

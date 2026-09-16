@@ -1,6 +1,7 @@
 model:
   name: "Qwen/Qwen2.5-1.5B-Instruct"
   dtype: "bfloat16"
+  attn_implementation: "sdpa" # "sdpa" (PyTorch Scaled Dot-Product Attention) or "eager"
 
 extraction:
   layers: [7, 10, 14, 18, 21]
@@ -9,20 +10,24 @@ extraction:
   seed: 42
 
 sweep:
-  layers: [14]              # subset of extraction.layers to actually eval
+  layers: [14] # subset of extraction.layers to actually eval
   modes: ["add", "rotate"]
   add_coefficients: [0.5, 1.0, 2.0, 4.0, 8.0]
   rotate_angles_deg: [10, 20, 30, 45, 60]
 
 evaluation:
-  num_samples: 300           # bumped up from the old default of 100 to reduce eval noise
-  batch_size: 64
-  max_new_tokens: 100
+  adversarial_dataset: "jailbreakbench" # options: "jailbreakbench", "harmbench", "pku"
+  benign_dataset: "xstest" # options: "xstest", "jailbreakbench", "pku"
+  harmbench_url: "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_all.csv"
+  num_samples: null # null for full benchmark (100 for JBB, 400 for HarmBench, 250 for XSTest)
+  batch_size: 32 # increased batch size for batched generation speedup
+  classifier_batch_size: 64 # batch size for GLiGuard and RefusalChecker
+  max_new_tokens: 40 # 40 tokens for fast exploratory sweep (enough for refusal detection)
   constitution_path: "constitution.txt"
-  eval_cache_path: "steering/eval_cache/fixed_eval_set.json"
+  eval_cache_dir: "steering/eval_cache"
   refusal_classifier_model: "natong19/refusal_classifier"
   guard_model: "fastino/gliguard-LLMGuardrails-300M"
-  filter_eval_with_guard: true
+  filter_eval_with_guard: false # false for standard benchmarks like JBB / HarmBench / XSTest
   bootstrap_iterations: 1000
   bootstrap_seed: 42
   results_csv_path: "steering/results/sweep_results.csv"
@@ -32,8 +37,11 @@ wandb:
   project: "memory-block-alignment-caa"
   entity: "mr_letters-personal"
   run_name: "caa-steering-sweep"
-  mode: "online"             # options: "online", "offline", "disabled"
+  mode: "online" # options: "online", "offline", "disabled"
   tags:
     - "steering-vector"
     - "caa"
+    - "jailbreakbench"
+    - "xstest"
+    - "harmbench"
     - "ai-alignment"

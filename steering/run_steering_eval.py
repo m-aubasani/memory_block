@@ -11,17 +11,23 @@ import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 
+# Ensure UTF-8 stdout on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Ensure project root is in sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from data_loader import AlignmentDataset
 from refusal_checker import RefusalChecker
 from gliguard_checker import GLiGuardChecker
 from steering.steering_hook import SteeringHook
 from steering.generator import SteeredGenerator
-from eval import generate_in_batches
+from steering.dataset_loader import get_or_create_evaluation_suite
 
 
 def load_yaml_config(config_path: str):
@@ -51,80 +57,61 @@ def compute_bootstrap_ci(scores, num_iterations=1000, seed=42, alpha=0.05):
     return mean_val, ci_low, ci_high
 
 
-def get_or_create_cached_eval_prompts(
-    cache_path: str,
+def generate_in_batches_fast(
+    generate_fn,
+    formatted_prompts: list,
     tokenizer,
-    num_samples: int = 300,
-    dataset_name: str = "PKU-Alignment/PKU-SafeRLHF",
-    guard_model_name: str = "fastino/gliguard-LLMGuardrails-300M",
-    filter_eval_with_guard: bool = True,
-    seed: int = 42,
-    device: str = "cuda",
+    device,
+    batch_size: int = 32,
+    max_new_tokens: int = 40,
+    desc: str = "Generating",
 ):
     """
-    Loads fixed evaluation prompts from cache if available, or derives and saves them.
-    Ensures identical evaluation prompts across all sweep iterations.
+    High-performance batched text generation using length-bucketed left-padding and torch.inference_mode.
+    Minimizes redundant padding tokens across samples within each batch.
     """
-    if os.path.exists(cache_path):
-        print(f"\n📂 Loading cached evaluation prompts from '{cache_path}'...")
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cached_data = json.load(f)
-            adv_prompts = cached_data["adversarial"]
-            safe_prompts = cached_data["safe"]
-            print(f"Loaded {len(adv_prompts)} adversarial and {len(safe_prompts)} safe/benign cached prompts.")
-            return adv_prompts, safe_prompts
+    if not formatted_prompts:
+        return []
 
-    print(f"\n⚙️ Generating fixed evaluation prompt cache ({num_samples} samples per split)...")
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    # 1. Sort prompts by length to minimize left-padding overhead within batches
+    indexed_prompts = list(enumerate(formatted_prompts))
+    indexed_prompts.sort(key=lambda x: len(x[1]))
 
-    # 1. Adversarial prompts (both responses unsafe)
-    print("Deriving adversarial evaluation prompts...")
-    adv_dataset = AlignmentDataset(
-        tokenizer=tokenizer,
-        split="test",
-        max_samples=num_samples,
-        dataset_name=dataset_name,
-        eval_mode="adversarial",
-        filter_eval_with_guard=filter_eval_with_guard,
-        guard_model_name=guard_model_name,
-        seed=seed,
-        device=device,
-    )
-    adv_prompts = [item["prompt"] for item in adv_dataset.dataset]
+    responses_with_indices = []
 
-    # 2. Safe/benign prompts (both responses safe)
-    print("Deriving safe/benign evaluation prompts...")
-    safe_dataset = AlignmentDataset(
-        tokenizer=tokenizer,
-        split="test",
-        max_samples=num_samples,
-        dataset_name=dataset_name,
-        eval_mode="safe",
-        filter_eval_with_guard=filter_eval_with_guard,
-        guard_model_name=guard_model_name,
-        seed=seed,
-        device=device,
-    )
-    safe_prompts = [item["prompt"] for item in safe_dataset.dataset]
+    for i in tqdm(range(0, len(indexed_prompts), batch_size), desc=desc, leave=False):
+        batch = indexed_prompts[i : i + batch_size]
+        batch_indices = [item[0] for item in batch]
+        batch_texts = [item[1] for item in batch]
 
-    cache_data = {
-        "adversarial": adv_prompts,
-        "safe": safe_prompts,
-        "metadata": {
-            "num_samples": num_samples,
-            "dataset_name": dataset_name,
-            "seed": seed,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    }
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(cache_data, f, indent=2)
-    print(f"✅ Cached {len(adv_prompts)} adversarial and {len(safe_prompts)} safe prompts to '{cache_path}'.\n")
+        inputs = tokenizer(
+            batch_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        ).to(device)
 
-    return adv_prompts, safe_prompts
+        with torch.inference_mode():
+            outputs = generate_fn(
+                input_ids=inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.pad_token_id,
+                use_cache=True,
+            )
+
+        input_len = inputs.input_ids.shape[1]
+        for j, orig_idx in enumerate(batch_indices):
+            gen_tokens = outputs[j][input_len:]
+            decoded = tokenizer.decode(gen_tokens, skip_special_tokens=True)
+            responses_with_indices.append((orig_idx, decoded))
+
+    # 2. Restore original ordering
+    responses_with_indices.sort(key=lambda x: x[0])
+    return [item[1] for item in responses_with_indices]
 
 
-def run_sweep(config_path: str = "steering/steering_config.yaml"):
+def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_dataset: str = None):
     config = load_yaml_config(config_path)
     model_cfg = config.get("model", {})
     sweep_cfg = config.get("sweep", {})
@@ -134,27 +121,36 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
     seed = eval_cfg.get("bootstrap_seed", 42)
     set_seed(seed)
 
+    adv_dataset_name = override_adv_dataset or eval_cfg.get("adversarial_dataset", "jailbreakbench")
+    benign_dataset_name = eval_cfg.get("benign_dataset", "xstest")
+
     # Initialize Weights & Biases if enabled
     use_wandb = wandb_cfg.get("enabled", False)
     if use_wandb:
         import wandb
+        tags = wandb_cfg.get("tags", ["steering-vector", "caa"])
+        if adv_dataset_name not in tags:
+            tags.append(adv_dataset_name)
         wandb.init(
             project=wandb_cfg.get("project", "memory-block-alignment"),
             entity=wandb_cfg.get("entity", None),
-            name=wandb_cfg.get("run_name", "caa-steering-sweep"),
+            name=wandb_cfg.get("run_name", f"caa-steering-{adv_dataset_name}"),
             mode=wandb_cfg.get("mode", "online"),
-            tags=wandb_cfg.get("tags", ["steering-vector", "caa"]),
+            tags=tags,
             config=config,
         )
 
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"\n=======================================================")
-        print(f"🎯 STEERING VECTOR EVALUATION & PARAMETER SWEEP")
+        print(f"🎯 ACCELERATED STEERING VECTOR EVALUATION & PARAMETER SWEEP")
         print(f"=======================================================")
         print(f"Device:               {device}")
         print(f"Model:                {model_cfg.get('name')}")
-        print(f"Eval Samples:         {eval_cfg.get('num_samples')}")
+        print(f"Adversarial Dataset:  {adv_dataset_name}")
+        print(f"Benign Dataset:       {benign_dataset_name}")
+        print(f"Max New Tokens:       {eval_cfg.get('max_new_tokens', 40)}")
+        print(f"Generation Batch Size:{eval_cfg.get('batch_size', 32)}")
         print(f"Sweep Layers:         {sweep_cfg.get('layers')}")
         print(f"Sweep Modes:          {sweep_cfg.get('modes')}")
         print(f"Add Coefficients:     {sweep_cfg.get('add_coefficients')}")
@@ -175,44 +171,55 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
 
-        print(f"Loading base model '{model_name}'...")
-        base_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=torch_dtype,
-        ).to(device)
+        attn_impl = model_cfg.get("attn_implementation", "sdpa")
+        print(f"Loading base model '{model_name}' (attn_implementation='{attn_impl}')...")
+        try:
+            base_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                dtype=torch_dtype,
+                attn_implementation=attn_impl,
+            ).to(device)
+        except Exception as e:
+            print(f"Warning: could not load with attn_implementation='{attn_impl}' ({e}), falling back to default.")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                dtype=torch_dtype,
+            ).to(device)
         base_model.eval()
 
         # Load Constitution
         constitution_path = eval_cfg.get("constitution_path", "constitution.txt")
+        if not os.path.exists(constitution_path):
+            constitution_path = os.path.join(PROJECT_ROOT, constitution_path)
         with open(constitution_path, "r", encoding="utf-8") as f:
             constitution = f.read()
 
         # 2. Obtain Fixed Evaluation Prompts
-        eval_cache_path = eval_cfg.get("eval_cache_path", "steering/eval_cache/fixed_eval_set.json")
-        num_samples = eval_cfg.get("num_samples", 300)
+        cache_dir = eval_cfg.get("eval_cache_dir", "steering/eval_cache")
+        num_samples = eval_cfg.get("num_samples", None)
+        harmbench_url = eval_cfg.get("harmbench_url", "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_all.csv")
         guard_model_name = eval_cfg.get("guard_model", "fastino/gliguard-LLMGuardrails-300M")
         refusal_model_name = eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier")
-        dataset_name = config.get("extraction", {}).get("dataset_name", "PKU-Alignment/PKU-SafeRLHF")
-        filter_eval_with_guard = eval_cfg.get("filter_eval_with_guard", True)
-        batch_size = eval_cfg.get("batch_size", 16)
-        max_new_tokens = eval_cfg.get("max_new_tokens", 100)
+        filter_eval_with_guard = eval_cfg.get("filter_eval_with_guard", False)
+        batch_size = eval_cfg.get("batch_size", 32)
+        clf_batch_size = eval_cfg.get("classifier_batch_size", 64)
+        max_new_tokens = eval_cfg.get("max_new_tokens", 40)
         boot_iters = eval_cfg.get("bootstrap_iterations", 1000)
 
-        adv_prompts, safe_prompts = get_or_create_cached_eval_prompts(
-            cache_path=eval_cache_path,
-            tokenizer=tokenizer,
+        adv_prompts, safe_prompts = get_or_create_evaluation_suite(
+            cache_dir=cache_dir,
+            adv_dataset_name=adv_dataset_name,
+            benign_dataset_name=benign_dataset_name,
+            harmbench_url=harmbench_url,
             num_samples=num_samples,
-            dataset_name=dataset_name,
-            guard_model_name=guard_model_name,
-            filter_eval_with_guard=filter_eval_with_guard,
             seed=seed,
-            device=device,
+            tokenizer=tokenizer,
+            filter_eval_with_guard=filter_eval_with_guard,
+            guard_model_name=guard_model_name,
+            device=str(device),
         )
-
-        # Configure tokenizer for left-padding during batch generation
-        orig_padding_side = tokenizer.padding_side
-        tokenizer.padding_side = "left"
 
         # Format prompts
         adv_base_formatted = [
@@ -233,10 +240,19 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
         ]
 
         # =========================================================================
-        # STEP 1: Compute Baseline & System Prompt Evaluations (ONCE)
+        # STAGE 1: BATCHED TEXT GENERATION (ALL CONFIGURATIONS FIRST)
         # =========================================================================
-        print("\n--- Generating & Evaluating Baseline (Unsteered) Responses ---")
-        base_adv_responses = generate_in_batches(
+        t_gen_start = time.time()
+        print("\n" + "=" * 60)
+        print("⚡ STAGE 1: BATCHED TEXT GENERATION (Base Model in VRAM)")
+        print("=" * 60)
+
+        # Dictionary to hold all generated responses
+        # Key format: ("baseline" | "sysprompt" | f"steered_L{l}_{m}_{param}", "adv" | "safe")
+        generated_responses = {}
+
+        print("\n[Gen 1/3] Generating Baseline (Unsteered) responses...")
+        generated_responses[("baseline", "adv")] = generate_in_batches_fast(
             generate_fn=base_model.generate,
             formatted_prompts=adv_base_formatted,
             tokenizer=tokenizer,
@@ -245,7 +261,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             max_new_tokens=max_new_tokens,
             desc="Baseline Adv Gen",
         )
-        base_safe_responses = generate_in_batches(
+        generated_responses[("baseline", "safe")] = generate_in_batches_fast(
             generate_fn=base_model.generate,
             formatted_prompts=safe_base_formatted,
             tokenizer=tokenizer,
@@ -255,8 +271,8 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             desc="Baseline Safe Gen",
         )
 
-        print("\n--- Generating & Evaluating System Prompt Responses ---")
-        sys_adv_responses = generate_in_batches(
+        print("\n[Gen 2/3] Generating System Prompt responses...")
+        generated_responses[("sysprompt", "adv")] = generate_in_batches_fast(
             generate_fn=base_model.generate,
             formatted_prompts=adv_sys_formatted,
             tokenizer=tokenizer,
@@ -265,7 +281,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             max_new_tokens=max_new_tokens,
             desc="SysPrompt Adv Gen",
         )
-        sys_safe_responses = generate_in_batches(
+        generated_responses[("sysprompt", "safe")] = generate_in_batches_fast(
             generate_fn=base_model.generate,
             formatted_prompts=safe_sys_formatted,
             tokenizer=tokenizer,
@@ -275,29 +291,148 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             desc="SysPrompt Safe Gen",
         )
 
-        # Evaluate Baseline & SysPrompt Safety
-        print("\nScoring Baseline and System Prompt responses...")
-        guard = GLiGuardChecker(model_name=guard_model_name, device=device)
-        base_adv_safe = guard.is_response_safe(base_adv_responses, prompts=adv_prompts, batch_size=batch_size)
-        sys_adv_safe = guard.is_response_safe(sys_adv_responses, prompts=adv_prompts, batch_size=batch_size)
+        # Prepare Steering Configurations
+        vector_dir = "steering/vectors"
+        sweep_layers = sweep_cfg.get("layers", [14])
+        sweep_modes = sweep_cfg.get("modes", ["add", "rotate"])
+        add_coeffs = sweep_cfg.get("add_coefficients", [0.5, 1.0, 2.0, 4.0, 8.0])
+        rotate_angles = sweep_cfg.get("rotate_angles_deg", [10, 20, 30, 45, 60])
+
+        steered_configs = []
+        for layer_idx in sweep_layers:
+            vector_path = os.path.join(vector_dir, f"layer_{layer_idx}.pt")
+            if not os.path.exists(vector_path):
+                print(f"[WARN] Vector file '{vector_path}' not found! Skipping layer {layer_idx}.")
+                continue
+
+            vec_data = torch.load(vector_path, map_location="cpu", weights_only=False)
+            vector_tensor = vec_data["vector"]
+
+            for mode in sweep_modes:
+                if mode == "add":
+                    for c in add_coeffs:
+                        steered_configs.append({
+                            "layer": layer_idx,
+                            "mode": "add",
+                            "coefficient": c,
+                            "angle_deg": None,
+                            "angle_rad": None,
+                            "vector": vector_tensor,
+                            "key": f"steered_L{layer_idx}_add_{c}",
+                        })
+                elif mode == "rotate":
+                    for deg in rotate_angles:
+                        rad = math.radians(deg)
+                        steered_configs.append({
+                            "layer": layer_idx,
+                            "mode": "rotate",
+                            "coefficient": None,
+                            "angle_deg": deg,
+                            "angle_rad": rad,
+                            "vector": vector_tensor,
+                            "key": f"steered_L{layer_idx}_rotate_{deg}",
+                        })
+
+        print(f"\n[Gen 3/3] Generating Steered responses ({len(steered_configs)} configurations)...")
+        for cfg_item in steered_configs:
+            label = f"L{cfg_item['layer']} | {cfg_item['mode']} " + (f"coeff={cfg_item['coefficient']}" if cfg_item['mode'] == "add" else f"angle={cfg_item['angle_deg']}°")
+            hook = SteeringHook(
+                vector=cfg_item["vector"],
+                mode=cfg_item["mode"],
+                coefficient=cfg_item["coefficient"] if cfg_item["coefficient"] is not None else 1.0,
+                angle_rad=cfg_item["angle_rad"] if cfg_item["angle_rad"] is not None else 0.0,
+            )
+            generator = SteeredGenerator(base_model, {cfg_item["layer"]: hook})
+
+            generated_responses[(cfg_item["key"], "adv")] = generate_in_batches_fast(
+                generate_fn=generator.generate,
+                formatted_prompts=adv_base_formatted,
+                tokenizer=tokenizer,
+                device=device,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+                desc=f"Steered Adv ({label})",
+            )
+            generated_responses[(cfg_item["key"], "safe")] = generate_in_batches_fast(
+                generate_fn=generator.generate,
+                formatted_prompts=safe_base_formatted,
+                tokenizer=tokenizer,
+                device=device,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+                desc=f"Steered Safe ({label})",
+            )
+
+        t_gen_end = time.time()
+        print(f"✅ Text generation completed in {t_gen_end - t_gen_start:.1f}s.")
+
+        # Clean VRAM cache before classification
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # =========================================================================
+        # STAGE 2: CONTINUOUS BATCH CLASSIFICATION (LOAD CLASSIFIERS ONCE)
+        # =========================================================================
+        t_clf_start = time.time()
+        print("\n" + "=" * 60)
+        print("🔍 STAGE 2: CONTINUOUS BATCH CLASSIFICATION (Single Load Pass)")
+        print("=" * 60)
+
+        # 2.1 Adversarial Safety Classification with GLiGuard (Single Pass)
+        print(f"\nLoading GLiGuard classifier '{guard_model_name}' once for all adversarial responses...")
+        guard = GLiGuardChecker(model_name=guard_model_name, device=str(device))
+
+        adv_keys = ["baseline", "sysprompt"] + [cfg["key"] for cfg in steered_configs]
+        adv_scores_dict = {}
+
+        for key in tqdm(adv_keys, desc="GLiGuard Safety Scoring"):
+            responses = generated_responses[(key, "adv")]
+            is_safe_list = guard.is_response_safe(responses, prompts=adv_prompts, batch_size=clf_batch_size)
+            adv_scores_dict[key] = is_safe_list
+
         del guard
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        # 2.2 Benign Over-Refusal Classification with RefusalChecker (Single Pass)
+        print(f"\nLoading RefusalChecker classifier '{refusal_model_name}' once for all benign responses...")
         checker = RefusalChecker(model_name=refusal_model_name, device=device)
-        base_benign_refused = checker.is_refusal(base_safe_responses)
-        sys_benign_refused = checker.is_refusal(sys_safe_responses)
+
+        safe_keys = ["baseline", "sysprompt"] + [cfg["key"] for cfg in steered_configs]
+        safe_scores_dict = {}
+
+        for key in tqdm(safe_keys, desc="RefusalChecker Scoring"):
+            responses = generated_responses[(key, "safe")]
+            is_refusal_list = checker.is_refusal(responses)
+            safe_scores_dict[key] = is_refusal_list
+
         del checker
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        t_clf_end = time.time()
+        print(f"✅ Safety classification completed in {t_clf_end - t_clf_start:.1f}s.")
+
+        # =========================================================================
+        # STAGE 3: METRICS, BOOTSTRAP CONFIDENCE INTERVALS, & W&B LOGGING
+        # =========================================================================
+        print("\n" + "=" * 60)
+        print("📊 STAGE 3: COMPUTING BOOTSTRAP CIs & SUMMARY METRICS")
+        print("=" * 60)
+
+        # Baseline stats
+        base_adv_safe = adv_scores_dict["baseline"]
+        base_benign_refused = safe_scores_dict["baseline"]
         base_adv_rate, base_adv_low, base_adv_high = compute_bootstrap_ci(base_adv_safe, num_iterations=boot_iters, seed=seed)
         base_ref_rate, base_ref_low, base_ref_high = compute_bootstrap_ci(base_benign_refused, num_iterations=boot_iters, seed=seed)
 
+        # SysPrompt stats
+        sys_adv_safe = adv_scores_dict["sysprompt"]
+        sys_benign_refused = safe_scores_dict["sysprompt"]
         sys_adv_rate, sys_adv_low, sys_adv_high = compute_bootstrap_ci(sys_adv_safe, num_iterations=boot_iters, seed=seed)
         sys_ref_rate, sys_ref_low, sys_ref_high = compute_bootstrap_ci(sys_benign_refused, num_iterations=boot_iters, seed=seed)
 
-        print(f"\n📊 Baseline Results:    Adv Safety = {base_adv_rate:.1f}% [{base_adv_low:.1f}, {base_adv_high:.1f}] | Benign Refusal = {base_ref_rate:.1f}% [{base_ref_low:.1f}, {base_ref_high:.1f}]")
+        print(f"📊 Baseline Results:    Adv Safety = {base_adv_rate:.1f}% [{base_adv_low:.1f}, {base_adv_high:.1f}] | Benign Refusal = {base_ref_rate:.1f}% [{base_ref_low:.1f}, {base_ref_high:.1f}]")
         print(f"📊 SysPrompt Results:   Adv Safety = {sys_adv_rate:.1f}% [{sys_adv_low:.1f}, {sys_adv_high:.1f}] | Benign Refusal = {sys_ref_rate:.1f}% [{sys_ref_low:.1f}, {sys_ref_high:.1f}]\n")
 
         # Log Baseline & SysPrompt metrics to W&B
@@ -321,143 +456,73 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             wandb.run.summary["sysprompt_adv_safety_rate"] = sys_adv_rate
             wandb.run.summary["sysprompt_benign_refusal_rate"] = sys_ref_rate
 
-        # =========================================================================
-        # STEP 2: Parameter Sweep Over Steering Vectors
-        # =========================================================================
         results = []
-        vector_dir = "steering/vectors"
+        for step_idx, cfg_item in enumerate(steered_configs, 1):
+            key = cfg_item["key"]
+            adv_safe_scores = adv_scores_dict[key]
+            safe_refusal_scores = safe_scores_dict[key]
 
-        sweep_layers = sweep_cfg.get("layers", [14])
-        sweep_modes = sweep_cfg.get("modes", ["add", "rotate"])
-        add_coeffs = sweep_cfg.get("add_coefficients", [0.5, 1.0, 2.0, 4.0, 8.0])
-        rotate_angles = sweep_cfg.get("rotate_angles_deg", [10, 20, 30, 45, 60])
+            adv_rate, adv_low, adv_high = compute_bootstrap_ci(adv_safe_scores, num_iterations=boot_iters, seed=seed)
+            ref_rate, ref_low, ref_high = compute_bootstrap_ci(safe_refusal_scores, num_iterations=boot_iters, seed=seed)
 
-        step_idx = 0
-        for layer_idx in sweep_layers:
-            vector_path = os.path.join(vector_dir, f"layer_{layer_idx}.pt")
-            if not os.path.exists(vector_path):
-                print(f"⚠️ Vector file '{vector_path}' not found! Skipping layer {layer_idx}.")
-                continue
+            delta_adv_base = adv_rate - base_adv_rate
+            delta_ref_base = ref_rate - base_ref_rate
 
-            vec_data = torch.load(vector_path, map_location="cpu", weights_only=False)
-            vector_tensor = vec_data["vector"]
-            print(f"\n==========================================")
-            print(f"⚙️ Evaluating Layer {layer_idx} (Vector norm = {vec_data['norm']:.4f})")
-            print(f"==========================================")
+            m = cfg_item["mode"]
+            coeff = cfg_item["coefficient"]
+            deg = cfg_item["angle_deg"]
+            rad = cfg_item["angle_rad"]
 
-            for mode in sweep_modes:
-                if mode == "add":
-                    param_list = [("add", c, None, None) for c in add_coeffs]
-                elif mode == "rotate":
-                    param_list = [("rotate", None, deg, math.radians(deg)) for deg in rotate_angles]
-                else:
-                    continue
+            label = f"L{cfg_item['layer']} | {m} " + (f"coeff={coeff}" if m == "add" else f"angle={deg}°")
+            print(f">>> Config [{step_idx:02d}]: {label:<30} | Adv Safety: {adv_rate:5.1f}% [{adv_low:4.1f}, {adv_high:4.1f}] | Benign Refusal: {ref_rate:5.1f}% [{ref_low:4.1f}, {ref_high:4.1f}]")
 
-                for m, coeff, deg, rad in param_list:
-                    step_idx += 1
-                    label = f"mode={m}, coeff={coeff}" if m == "add" else f"mode={m}, angle={deg}° ({rad:.3f} rad)"
-                    print(f"\n>>> Running configuration [{step_idx}]: Layer {layer_idx} | {label}")
+            row_data = {
+                "layer": cfg_item["layer"],
+                "mode": m,
+                "coefficient": coeff,
+                "angle_deg": deg,
+                "angle_rad": round(rad, 4) if rad is not None else None,
+                "adv_safety_rate": adv_rate,
+                "adv_safety_ci_low": adv_low,
+                "adv_safety_ci_high": adv_high,
+                "benign_refusal_rate": ref_rate,
+                "benign_refusal_ci_low": ref_low,
+                "benign_refusal_ci_high": ref_high,
+                "n_eval_samples": len(adv_prompts),
+                "adversarial_dataset": adv_dataset_name,
+                "benign_dataset": benign_dataset_name,
+            }
+            results.append(row_data)
 
-                    hook = SteeringHook(
-                        vector=vector_tensor,
-                        mode=m,
-                        coefficient=coeff if coeff is not None else 1.0,
-                        angle_rad=rad if rad is not None else 0.0,
-                    )
-                    generator = SteeredGenerator(base_model, {layer_idx: hook})
+            # Log step metrics to W&B
+            if use_wandb and wandb.run is not None:
+                param_val = coeff if m == "add" else deg
+                wandb.log({
+                    "sweep/step": step_idx,
+                    "sweep/layer": cfg_item["layer"],
+                    "sweep/adv_safety_rate": adv_rate,
+                    "sweep/adv_safety_ci_low": adv_low,
+                    "sweep/adv_safety_ci_high": adv_high,
+                    "sweep/benign_refusal_rate": ref_rate,
+                    "sweep/benign_refusal_ci_low": ref_low,
+                    "sweep/benign_refusal_ci_high": ref_high,
+                    "sweep/delta_adv_vs_baseline": delta_adv_base,
+                    "sweep/delta_refusal_vs_baseline": delta_ref_base,
+                    f"layer_{cfg_item['layer']}_{m}/adv_safety_rate": adv_rate,
+                    f"layer_{cfg_item['layer']}_{m}/benign_refusal_rate": ref_rate,
+                    f"layer_{cfg_item['layer']}_{m}/param_value": param_val,
+                })
 
-                    # Generate responses
-                    steered_adv_responses = generate_in_batches(
-                        generate_fn=generator.generate,
-                        formatted_prompts=adv_base_formatted,
-                        tokenizer=tokenizer,
-                        device=device,
-                        batch_size=batch_size,
-                        max_new_tokens=max_new_tokens,
-                        desc=f"Steered Adv Gen ({label})",
-                    )
-                    steered_safe_responses = generate_in_batches(
-                        generate_fn=generator.generate,
-                        formatted_prompts=safe_base_formatted,
-                        tokenizer=tokenizer,
-                        device=device,
-                        batch_size=batch_size,
-                        max_new_tokens=max_new_tokens,
-                        desc=f"Steered Safe Gen ({label})",
-                    )
-
-                    # Score responses
-                    guard = GLiGuardChecker(model_name=guard_model_name, device=device)
-                    steered_adv_safe = guard.is_response_safe(steered_adv_responses, prompts=adv_prompts, batch_size=batch_size)
-                    del guard
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                    checker = RefusalChecker(model_name=refusal_model_name, device=device)
-                    steered_safe_refused = checker.is_refusal(steered_safe_responses)
-                    del checker
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                    adv_rate, adv_low, adv_high = compute_bootstrap_ci(steered_adv_safe, num_iterations=boot_iters, seed=seed)
-                    ref_rate, ref_low, ref_high = compute_bootstrap_ci(steered_safe_refused, num_iterations=boot_iters, seed=seed)
-
-                    delta_adv_base = adv_rate - base_adv_rate
-                    delta_ref_base = ref_rate - base_ref_rate
-
-                    print(f"  ↳ Adv Safety:     {adv_rate:.1f}% [{adv_low:.1f}, {adv_high:.1f}] (Delta vs Base: {delta_adv_base:+.1f}%)")
-                    print(f"  ↳ Benign Refusal: {ref_rate:.1f}% [{ref_low:.1f}, {ref_high:.1f}] (Delta vs Base: {delta_ref_base:+.1f}%)")
-
-                    row_data = {
-                        "layer": layer_idx,
-                        "mode": m,
-                        "coefficient": coeff,
-                        "angle_deg": deg,
-                        "angle_rad": round(rad, 4) if rad is not None else None,
-                        "adv_safety_rate": adv_rate,
-                        "adv_safety_ci_low": adv_low,
-                        "adv_safety_ci_high": adv_high,
-                        "benign_refusal_rate": ref_rate,
-                        "benign_refusal_ci_low": ref_low,
-                        "benign_refusal_ci_high": ref_high,
-                        "n_eval_samples": len(adv_prompts),
-                    }
-                    results.append(row_data)
-
-                    # Log per-iteration sweep metrics to W&B
-                    if use_wandb and wandb.run is not None:
-                        param_val = coeff if m == "add" else deg
-                        wandb.log({
-                            "sweep/step": step_idx,
-                            "sweep/layer": layer_idx,
-                            "sweep/adv_safety_rate": adv_rate,
-                            "sweep/adv_safety_ci_low": adv_low,
-                            "sweep/adv_safety_ci_high": adv_high,
-                            "sweep/benign_refusal_rate": ref_rate,
-                            "sweep/benign_refusal_ci_low": ref_low,
-                            "sweep/benign_refusal_ci_high": ref_high,
-                            "sweep/delta_adv_vs_baseline": delta_adv_base,
-                            "sweep/delta_refusal_vs_baseline": delta_ref_base,
-                            f"layer_{layer_idx}_{m}/adv_safety_rate": adv_rate,
-                            f"layer_{layer_idx}_{m}/benign_refusal_rate": ref_rate,
-                            f"layer_{layer_idx}_{m}/param_value": param_val,
-                        })
-
-        # Restore tokenizer padding side
-        tokenizer.padding_side = orig_padding_side
-
-        # =========================================================================
-        # STEP 3: Save Results & Summary
-        # =========================================================================
+        # Save CSV results
         results_dir = "steering/results"
         os.makedirs(results_dir, exist_ok=True)
-        results_csv_path = eval_cfg.get("results_csv_path", os.path.join(results_dir, "sweep_results.csv"))
+        results_csv_path = eval_cfg.get("results_csv_path", os.path.join(results_dir, f"sweep_results_{adv_dataset_name}.csv"))
 
         df_results = pd.DataFrame(results)
         df_results.to_csv(results_csv_path, index=False)
         print(f"\n📁 Saved sweep results to '{results_csv_path}'")
 
-        # Save summary table comparing Baseline, SysPrompt, and Steering Configurations
+        # Save summary table
         summary_rows = [
             {
                 "method": "Baseline (Unsteered)",
@@ -500,21 +565,24 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
             df_summary.iloc[2:].sort_values(by="adv_safety_rate", ascending=False)
         ], ignore_index=True)
 
-        summary_csv_path = os.path.join(results_dir, "summary_comparison.csv")
+        summary_csv_path = os.path.join(results_dir, f"summary_comparison_{adv_dataset_name}.csv")
         df_summary_sorted.to_csv(summary_csv_path, index=False)
 
-        print("\n" + "=" * 80)
-        print("🏆 FINAL COMPARISON SUMMARY TABLE (Sorted by Adversarial Safety %)")
-        print("=" * 80)
+        print("\n" + "=" * 85)
+        print(f"🏆 FINAL COMPARISON SUMMARY TABLE [{adv_dataset_name.upper()} + {benign_dataset_name.upper()}]")
+        print("=" * 85)
         print(df_summary_sorted.to_string(index=False))
-        print("=" * 80 + "\n")
+        print("=" * 85 + "\n")
 
-        # Log Final Tables and Best Summary to W&B
+        # Log Final Tables, Artifacts, and Best Summary to W&B
         if use_wandb and wandb.run is not None:
             wandb.log({
                 "results/sweep_table": wandb.Table(dataframe=df_results),
                 "results/summary_table": wandb.Table(dataframe=df_summary_sorted),
             })
+
+            wandb.save(results_csv_path, base_path=os.path.dirname(results_csv_path))
+            wandb.save(summary_csv_path, base_path=os.path.dirname(summary_csv_path))
 
             if len(results) > 0:
                 best_steered = max(results, key=lambda x: x["adv_safety_rate"])
@@ -531,15 +599,39 @@ def run_sweep(config_path: str = "steering/steering_config.yaml"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Steering Vector Sweep Evaluation")
+    parser = argparse.ArgumentParser(description="Run High-Speed Steering Vector Sweep Evaluation")
     parser.add_argument(
         "--config",
         type=str,
         default="steering/steering_config.yaml",
         help="Path to steering config YAML",
     )
+    parser.add_argument(
+        "--adversarial-dataset",
+        type=str,
+        default=None,
+        help="Adversarial dataset: 'jailbreakbench', 'harmbench', or 'pku'",
+    )
+    parser.add_argument(
+        "--benign-dataset",
+        type=str,
+        default=None,
+        help="Benign dataset: 'xstest', 'jailbreakbench', or 'pku'",
+    )
+    parser.add_argument(
+        "--eval-all",
+        action="store_true",
+        help="Run sweep across both JailbreakBench and HarmBench sequentially",
+    )
     args = parser.parse_args()
-    run_sweep(config_path=args.config)
+
+    if args.eval_all:
+        print("\n>>> Running evaluation on JailbreakBench...")
+        run_sweep(config_path=args.config, override_adv_dataset="jailbreakbench")
+        print("\n>>> Running evaluation on HarmBench...")
+        run_sweep(config_path=args.config, override_adv_dataset="harmbench")
+    else:
+        run_sweep(config_path=args.config, override_adv_dataset=args.adversarial_dataset)
 
 
 if __name__ == "__main__":
