@@ -624,7 +624,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
             param_str = f"coeff={r['coefficient']}" if r["mode"] == "add" else f"angle={r['angle_deg']}°"
             col = f"Steering L{r['layer']} {r['mode']} {param_str}"
             for mrow in matrix_rows:
-                mrow[col] = r[mrow["attack_subset"]]
+                mrow[col] = r[f"adv_safety_rate_{mrow['attack_subset']}"]
 
         df_subset_matrix = pd.DataFrame(matrix_rows)
         subset_matrix_csv_path = os.path.join(results_dir, f"per_subset_safety_{adv_dataset_name}.csv")
