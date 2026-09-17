@@ -22,7 +22,7 @@ evaluation:
   num_samples: null # null for full benchmark (100 for JBB, 400 for HarmBench, 250 for XSTest)
   batch_size: 32 # increased batch size for batched generation speedup
   classifier_batch_size: 64 # batch size for GLiGuard and RefusalChecker
-  max_new_tokens: 40 # 40 tokens for fast exploratory sweep (enough for refusal detection)
+  max_new_tokens: 80 # 40 tokens for fast exploratory sweep (enough for refusal detection)
   constitution_path: "constitution.txt"
   eval_cache_dir: "steering/eval_cache"
   refusal_classifier_model: "natong19/refusal_classifier"

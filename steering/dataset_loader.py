@@ -94,9 +94,9 @@ def load_benign_prompts(
     dataset_lower = dataset_name.lower()
 
     if "xstest" in dataset_lower:
-        print("[DATA] Loading XSTest evaluation prompts ('Paul/XSTest')...")
+        print("[DATA] Loading XSTest evaluation prompts ('walledai/XSTest')...")
         try:
-            ds = load_dataset("Paul/XSTest", split="train")
+            ds = load_dataset("walledai/XSTest", split="test")
             # Filter for safe prompts (over-refusal test set)
             safe_ds = [item["prompt"] for item in ds if item.get("label") == "safe" or "label" not in item]
             prompts = safe_ds if len(safe_ds) > 0 else [item["prompt"] for item in ds]

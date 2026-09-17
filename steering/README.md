@@ -31,7 +31,7 @@ This module implements high-performance inference-time safety alignment via Cont
    - **`pku`** (`PKU-Alignment/PKU-SafeRLHF` test split).
 
 2. **Benign Over-Refusal Benchmarks**:
-   - **`xstest`** (`Paul/XSTest`, 250 benign safe prompts with sensitive keywords like "kill a process").
+   - **`xstest`** (`walledai/XSTest`, 250 benign safe prompts with sensitive keywords like "kill a process").
    - **`jailbreakbench`** (benign split, 100 prompts).
    - **`pku`** (`PKU-Alignment/PKU-SafeRLHF` safe split).
 
