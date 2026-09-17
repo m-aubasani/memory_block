@@ -574,15 +574,62 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
         print(df_summary_sorted.to_string(index=False))
         print("=" * 85 + "\n")
 
+        # =========================================================================
+        # STAGE 4: BUILD PER-PROMPT GENERATIONS DATAFRAMES & UPLOAD
+        # =========================================================================
+        print("\n" + "=" * 60)
+        print("💾 STAGE 4: SAVING PROMPT & COMPLETION COMPARISONS")
+        print("=" * 60)
+
+        # 4.1 Adversarial Generations Table
+        adv_gen_dict = {
+            "Prompt": adv_prompts,
+            "Baseline_Response": generated_responses[("baseline", "adv")],
+            "Baseline_Safe": adv_scores_dict["baseline"],
+            "SysPrompt_Response": generated_responses[("sysprompt", "adv")],
+            "SysPrompt_Safe": adv_scores_dict["sysprompt"],
+        }
+        for cfg in steered_configs:
+            label_col = f"L{cfg['layer']}_{cfg['mode']}_" + (f"coeff_{cfg['coefficient']}" if cfg['mode'] == "add" else f"angle_{cfg['angle_deg']}deg")
+            adv_gen_dict[f"{label_col}_Response"] = generated_responses[(cfg["key"], "adv")]
+            adv_gen_dict[f"{label_col}_Safe"] = adv_scores_dict[cfg["key"]]
+
+        df_adv_generations = pd.DataFrame(adv_gen_dict)
+        adv_gen_csv_path = os.path.join(results_dir, f"generations_adversarial_{adv_dataset_name}.csv")
+        df_adv_generations.to_csv(adv_gen_csv_path, index=False)
+        print(f"📁 Saved adversarial prompt/response comparisons to '{adv_gen_csv_path}'")
+
+        # 4.2 Safe/Benign Generations Table
+        safe_gen_dict = {
+            "Prompt": safe_prompts,
+            "Baseline_Response": generated_responses[("baseline", "safe")],
+            "Baseline_Refused": safe_scores_dict["baseline"],
+            "SysPrompt_Response": generated_responses[("sysprompt", "safe")],
+            "SysPrompt_Refused": safe_scores_dict["sysprompt"],
+        }
+        for cfg in steered_configs:
+            label_col = f"L{cfg['layer']}_{cfg['mode']}_" + (f"coeff_{cfg['coefficient']}" if cfg['mode'] == "add" else f"angle_{cfg['angle_deg']}deg")
+            safe_gen_dict[f"{label_col}_Response"] = generated_responses[(cfg["key"], "safe")]
+            safe_gen_dict[f"{label_col}_Refused"] = safe_scores_dict[cfg["key"]]
+
+        df_safe_generations = pd.DataFrame(safe_gen_dict)
+        safe_gen_csv_path = os.path.join(results_dir, f"generations_benign_{benign_dataset_name}.csv")
+        df_safe_generations.to_csv(safe_gen_csv_path, index=False)
+        print(f"📁 Saved benign prompt/response comparisons to '{safe_gen_csv_path}'")
+
         # Log Final Tables, Artifacts, and Best Summary to W&B
         if use_wandb and wandb.run is not None:
             wandb.log({
                 "results/sweep_table": wandb.Table(dataframe=df_results),
                 "results/summary_table": wandb.Table(dataframe=df_summary_sorted),
+                f"generations/adversarial_{adv_dataset_name}": wandb.Table(dataframe=df_adv_generations),
+                f"generations/benign_{benign_dataset_name}": wandb.Table(dataframe=df_safe_generations),
             })
 
             wandb.save(results_csv_path, base_path=os.path.dirname(results_csv_path))
             wandb.save(summary_csv_path, base_path=os.path.dirname(summary_csv_path))
+            wandb.save(adv_gen_csv_path, base_path=os.path.dirname(adv_gen_csv_path))
+            wandb.save(safe_gen_csv_path, base_path=os.path.dirname(safe_gen_csv_path))
 
             if len(results) > 0:
                 best_steered = max(results, key=lambda x: x["adv_safety_rate"])

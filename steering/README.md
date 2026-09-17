@@ -66,9 +66,16 @@ uv run python steering/run_steering_eval.py --eval-all
 ```
 
 Outputs:
-- CSV results: `steering/results/sweep_results_<dataset>.csv`
+- Aggregate sweep metrics: `steering/results/sweep_results_<dataset>.csv`
 - Comparative summary: `steering/results/summary_comparison_<dataset>.csv`
-- Live W&B dashboard tables, artifacts, and summary metrics.
+- **Per-prompt completions & verdicts**:
+  - `steering/results/generations_adversarial_<dataset>.csv` (Columns: `Prompt`, `Baseline_Response`, `Baseline_Safe`, `SysPrompt_Response`, `SysPrompt_Safe`, `L{layer}_{mode}_{param}_Response`, `_Safe`)
+  - `steering/results/generations_benign_<dataset>.csv` (Columns: `Prompt`, `Baseline_Response`, `Baseline_Refused`, `SysPrompt_Response`, `SysPrompt_Refused`, `L{layer}_{mode}_{param}_Response`, `_Refused`)
+- **Live W&B Tables**:
+  - `results/sweep_table`
+  - `results/summary_table`
+  - `generations/adversarial_<dataset>`
+  - `generations/benign_<dataset>`
 
 ---
 
