@@ -26,8 +26,21 @@ This module implements high-performance inference-time safety alignment via Cont
 ## 📊 Evaluation Datasets
 
 1. **Adversarial / Attack Benchmarks**:
-   - **`jailbreakbench`** (`JailbreakBench/JBB-Behaviors`, split="harmful", 100 behaviors): Curated adversarial jailbreak behaviors.
-   - **`harmbench`** (CAIS HarmBench standard, 400 behaviors): High-diversity automated red-teaming benchmark.
+   - **`jailbreakbench`** (default): Real jailbreak-wrapped attack prompts from all 12
+     available `JailbreakBench/artifacts` transfer artifacts (PAIR / GCG /
+     prompt_with_random_search x vicuna-13b-v1.5, llama-2-7b-chat-hf,
+     gpt-3.5-turbo-1106, gpt-4-0125-preview; ~1037 prompts) **plus** a static
+     template-wrapping fallback subset (DAN / AIM / Developer-Mode framings over
+     50 JBB goals; 200 prompts). Each prompt is tagged with its `subset`
+     (method/source-model) so results are reported per attack family, not as one
+     aggregate. Saved to `steering/results/per_subset_safety_jailbreakbench.csv`.
+   - **Family filtering**: set `evaluation.attack_family_filter` in
+     `steering_config.yaml` to a list of subset prefixes (e.g. `jbb_GCG`,
+     `template_jailbreak`) to run ONLY those attack families (all their prompts,
+     no cap; default top-5 ≈ 582 prompts). Set it to `null` to keep all families.
+   - **`harmbench`** (CAIS HarmBench, 400 behaviors): Plain behavior text only —
+     HarmBench provides no ready-made adversarial test cases without running its
+     own attack pipeline, so this is effectively disabled by default.
    - **`pku`** (`PKU-Alignment/PKU-SafeRLHF` test split).
 
 2. **Benign Over-Refusal Benchmarks**:

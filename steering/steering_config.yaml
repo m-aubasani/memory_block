@@ -16,13 +16,22 @@ sweep:
   rotate_angles_deg: [10, 20, 30, 45, 60]
 
 evaluation:
-  adversarial_dataset: "jailbreakbench" # options: "jailbreakbench", "harmbench", "pku"
+  adversarial_dataset: "jailbreakbench" # options: "jailbreakbench", "harmbench", "pku" (harmbench only has plain behavior text - not truly adversarial)
   benign_dataset: "xstest" # options: "xstest", "jailbreakbench", "pku"
   harmbench_url: "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_all.csv"
-  num_samples: null # null for full benchmark (100 for JBB, 400 for HarmBench, 250 for XSTest)
+  # JailbreakBench transfer attacks: all 12 available method/source-model artifacts
+  # (PAIR / GCG / prompt_with_random_search x vicuna-13b-v1.5, llama-2-7b-chat-hf,
+  #  gpt-3.5-turbo-1106, gpt-4-0125-preview) + @template_goals template-wrapped goals.
+  # Override with a list, e.g. [["PAIR", "vicuna-13b-v1.5", "black_box"]].
+  jbb_artifact_combos: null
+  template_goals: 50 # number of plain JBB goals wrapped with static jailbreak templates
+  # Attack-family filter: prefix-matches each prompt's `subset`. Default = top-5
+  # diverse families (~582 adversarial prompts). Set `null` to keep ALL families.
+  attack_family_filter: ["jbb_GCG_vicuna-13b-v1.5", "jbb_GCG_gpt-4-0125-preview", "jbb_PAIR_vicuna-13b-v1.5", "jbb_prompt_with_random_search_gpt-4-0125-preview", "template_jailbreak"]
+  num_samples: null # null for full benchmark (filtered families when attack_family_filter is set)
   batch_size: 32 # increased batch size for batched generation speedup
   classifier_batch_size: 64 # batch size for GLiGuard and RefusalChecker
-  max_new_tokens: 80 # 40 tokens for fast exploratory sweep (enough for refusal detection)
+  max_new_tokens: 60 # 60 tokens for fast exploratory sweep (enough for refusal detection)
   constitution_path: "constitution.txt"
   eval_cache_dir: "steering/eval_cache"
   refusal_classifier_model: "natong19/refusal_classifier"

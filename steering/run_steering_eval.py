@@ -57,6 +57,19 @@ def compute_bootstrap_ci(scores, num_iterations=1000, seed=42, alpha=0.05):
     return mean_val, ci_low, ci_high
 
 
+def compute_subset_rates(scores, subset_labels, num_iterations=1000, seed=42):
+    """
+    Per-attack-subset mean + bootstrap CI. scores[i] corresponds to subset_labels[i].
+    Returns {subset: (rate, ci_low, ci_high)} in first-appearance order.
+    """
+    subset_names = list(dict.fromkeys(subset_labels))
+    rates = {}
+    for s in subset_names:
+        sub_scores = [sc for i, sc in enumerate(scores) if subset_labels[i] == s]
+        rates[s] = compute_bootstrap_ci(sub_scores, num_iterations=num_iterations, seed=seed)
+    return rates
+
+
 def generate_in_batches_fast(
     generate_fn,
     formatted_prompts: list,
@@ -219,16 +232,27 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
             filter_eval_with_guard=filter_eval_with_guard,
             guard_model_name=guard_model_name,
             device=str(device),
+            jbb_combos=eval_cfg.get("jbb_artifact_combos"),
+            template_goals=eval_cfg.get("template_goals", 50),
+            attack_family_filter=eval_cfg.get("attack_family_filter"),
         )
+
+        # Adversarial prompts carry per-prompt {prompt, subset, goal} metadata.
+        adv_prompt_texts = [p["prompt"] for p in adv_prompts]
+        subset_labels = [p.get("subset", "unknown") for p in adv_prompts]
+        subset_names = list(dict.fromkeys(subset_labels))
+        subset_counts = {s: subset_labels.count(s) for s in subset_names}
+        print(f"[EVAL] Active attack-family filter: {eval_cfg.get('attack_family_filter') or 'ALL'}")
+        print(f"[EVAL] Adversarial subsets: {subset_counts}")
 
         # Format prompts
         adv_base_formatted = [
             tokenizer.apply_chat_template([{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
-            for p in adv_prompts
+            for p in adv_prompt_texts
         ]
         adv_sys_formatted = [
             tokenizer.apply_chat_template([{"role": "system", "content": constitution}, {"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
-            for p in adv_prompts
+            for p in adv_prompt_texts
         ]
         safe_base_formatted = [
             tokenizer.apply_chat_template([{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
@@ -387,7 +411,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
 
         for key in tqdm(adv_keys, desc="GLiGuard Safety Scoring"):
             responses = generated_responses[(key, "adv")]
-            is_safe_list = guard.is_response_safe(responses, prompts=adv_prompts, batch_size=clf_batch_size)
+            is_safe_list = guard.is_response_safe(responses, prompts=adv_prompt_texts, batch_size=clf_batch_size)
             adv_scores_dict[key] = is_safe_list
 
         del guard
@@ -425,12 +449,14 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
         base_benign_refused = safe_scores_dict["baseline"]
         base_adv_rate, base_adv_low, base_adv_high = compute_bootstrap_ci(base_adv_safe, num_iterations=boot_iters, seed=seed)
         base_ref_rate, base_ref_low, base_ref_high = compute_bootstrap_ci(base_benign_refused, num_iterations=boot_iters, seed=seed)
+        base_sub_rates = compute_subset_rates(base_adv_safe, subset_labels, num_iterations=boot_iters, seed=seed)
 
         # SysPrompt stats
         sys_adv_safe = adv_scores_dict["sysprompt"]
         sys_benign_refused = safe_scores_dict["sysprompt"]
         sys_adv_rate, sys_adv_low, sys_adv_high = compute_bootstrap_ci(sys_adv_safe, num_iterations=boot_iters, seed=seed)
         sys_ref_rate, sys_ref_low, sys_ref_high = compute_bootstrap_ci(sys_benign_refused, num_iterations=boot_iters, seed=seed)
+        sys_sub_rates = compute_subset_rates(sys_adv_safe, subset_labels, num_iterations=boot_iters, seed=seed)
 
         print(f"📊 Baseline Results:    Adv Safety = {base_adv_rate:.1f}% [{base_adv_low:.1f}, {base_adv_high:.1f}] | Benign Refusal = {base_ref_rate:.1f}% [{base_ref_low:.1f}, {base_ref_high:.1f}]")
         print(f"📊 SysPrompt Results:   Adv Safety = {sys_adv_rate:.1f}% [{sys_adv_low:.1f}, {sys_adv_high:.1f}] | Benign Refusal = {sys_ref_rate:.1f}% [{sys_ref_low:.1f}, {sys_ref_high:.1f}]\n")
@@ -464,6 +490,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
 
             adv_rate, adv_low, adv_high = compute_bootstrap_ci(adv_safe_scores, num_iterations=boot_iters, seed=seed)
             ref_rate, ref_low, ref_high = compute_bootstrap_ci(safe_refusal_scores, num_iterations=boot_iters, seed=seed)
+            sub_rates = compute_subset_rates(adv_safe_scores, subset_labels, num_iterations=boot_iters, seed=seed)
 
             delta_adv_base = adv_rate - base_adv_rate
             delta_ref_base = ref_rate - base_ref_rate
@@ -492,6 +519,9 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
                 "adversarial_dataset": adv_dataset_name,
                 "benign_dataset": benign_dataset_name,
             }
+            for s in subset_names:
+                row_data[f"adv_safety_rate_{s}"] = sub_rates[s][0]
+                row_data[f"n_eval_{s}"] = subset_counts[s]
             results.append(row_data)
 
             # Log step metrics to W&B
@@ -511,6 +541,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
                     f"layer_{cfg_item['layer']}_{m}/adv_safety_rate": adv_rate,
                     f"layer_{cfg_item['layer']}_{m}/benign_refusal_rate": ref_rate,
                     f"layer_{cfg_item['layer']}_{m}/param_value": param_val,
+                    **{f"sweep/subset_{s}_adv_safety_rate": sub_rates[s][0] for s in subset_names},
                 })
 
         # Save CSV results
@@ -545,10 +576,13 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
                 "benign_refusal_ci": f"[{sys_ref_low:.1f}, {sys_ref_high:.1f}]",
             },
         ]
+        for s in subset_names:
+            summary_rows[0][f"adv_safety_rate_{s}"] = base_sub_rates[s][0]
+            summary_rows[1][f"adv_safety_rate_{s}"] = sys_sub_rates[s][0]
 
         for r in results:
             param_str = f"coeff={r['coefficient']}" if r["mode"] == "add" else f"angle={r['angle_deg']}°"
-            summary_rows.append({
+            summary_row = {
                 "method": f"Steering (L{r['layer']})",
                 "layer": str(r["layer"]),
                 "mode": str(r["mode"]),
@@ -557,7 +591,10 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
                 "adv_safety_ci": f"[{r['adv_safety_ci_low']:.1f}, {r['adv_safety_ci_high']:.1f}]",
                 "benign_refusal_rate": float(r["benign_refusal_rate"]),
                 "benign_refusal_ci": f"[{r['benign_refusal_ci_low']:.1f}, {r['benign_refusal_ci_high']:.1f}]",
-            })
+            }
+            for s in subset_names:
+                summary_row[f"adv_safety_rate_{s}"] = r[f"adv_safety_rate_{s}"]
+            summary_rows.append(summary_row)
 
         df_summary = pd.DataFrame(summary_rows)
         df_summary_sorted = pd.concat([
@@ -574,6 +611,33 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
         print(df_summary_sorted.to_string(index=False))
         print("=" * 85 + "\n")
 
+        # Per-attack-subset breakdown: baseline vs sysprompt vs top steered configs.
+        matrix_rows = []
+        for s in subset_names:
+            matrix_rows.append({
+                "attack_subset": s,
+                "n": subset_counts[s],
+                "Baseline": base_sub_rates[s][0],
+                "SysPrompt": sys_sub_rates[s][0],
+            })
+        for r in sorted(results, key=lambda x: x["adv_safety_rate"], reverse=True)[:3]:
+            param_str = f"coeff={r['coefficient']}" if r["mode"] == "add" else f"angle={r['angle_deg']}°"
+            col = f"Steering L{r['layer']} {r['mode']} {param_str}"
+            for mrow in matrix_rows:
+                mrow[col] = r[mrow["attack_subset"]]
+
+        df_subset_matrix = pd.DataFrame(matrix_rows)
+        subset_matrix_csv_path = os.path.join(results_dir, f"per_subset_safety_{adv_dataset_name}.csv")
+        df_subset_matrix.to_csv(subset_matrix_csv_path, index=False)
+
+        print("\n" + "=" * 85)
+        print("🎯 PER-ATTACK-SUBSET ADVERSARIAL SAFETY RATES (% refused-safe)")
+        print(f"    (a) JBB transfer by method/source-model, (b) template-wrapping, (c) benign XSTest refusal is in the table above")
+        print("=" * 85)
+        print(df_subset_matrix.round(1).to_string(index=False))
+        print("=" * 85 + "\n")
+        print(f"📁 Saved per-attack-subset safety matrix to '{subset_matrix_csv_path}'")
+
         # =========================================================================
         # STAGE 4: BUILD PER-PROMPT GENERATIONS DATAFRAMES & UPLOAD
         # =========================================================================
@@ -583,7 +647,9 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
 
         # 4.1 Adversarial Generations Table
         adv_gen_dict = {
-            "Prompt": adv_prompts,
+            "Subset": subset_labels,
+            "Goal": [p.get("goal") for p in adv_prompts],
+            "Prompt": adv_prompt_texts,
             "Baseline_Response": generated_responses[("baseline", "adv")],
             "Baseline_Safe": adv_scores_dict["baseline"],
             "SysPrompt_Response": generated_responses[("sysprompt", "adv")],
@@ -622,12 +688,14 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
             wandb.log({
                 "results/sweep_table": wandb.Table(dataframe=df_results),
                 "results/summary_table": wandb.Table(dataframe=df_summary_sorted),
+                f"results/per_subset_safety_{adv_dataset_name}": wandb.Table(dataframe=df_subset_matrix),
                 f"generations/adversarial_{adv_dataset_name}": wandb.Table(dataframe=df_adv_generations),
                 f"generations/benign_{benign_dataset_name}": wandb.Table(dataframe=df_safe_generations),
             })
 
             wandb.save(results_csv_path, base_path=os.path.dirname(results_csv_path))
             wandb.save(summary_csv_path, base_path=os.path.dirname(summary_csv_path))
+            wandb.save(subset_matrix_csv_path, base_path=os.path.dirname(subset_matrix_csv_path))
             wandb.save(adv_gen_csv_path, base_path=os.path.dirname(adv_gen_csv_path))
             wandb.save(safe_gen_csv_path, base_path=os.path.dirname(safe_gen_csv_path))
 
