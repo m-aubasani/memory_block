@@ -61,8 +61,8 @@ JAILBREAK_TEMPLATES: List[str] = [
 DEFAULT_ATTACK_FAMILY_FILTER: List[str] = [
     "jbb_GCG_vicuna-13b-v1.5",
     "jbb_GCG_gpt-4-0125-preview",
-    "jbb_PAIR_vicuna-13b-v1.5",
     "jbb_prompt_with_random_search_gpt-4-0125-preview",
+    "jbb_prompt_with_random_search_llama-2-7b-chat-hf",
     "template_jailbreak",
 ]
 
@@ -141,7 +141,9 @@ def load_adversarial_prompts(
     device: str = "cuda",
     jbb_combos: Optional[List[Tuple[str, str, str]]] = None,
     template_goals: int = 50,
+    template_count: int = 1,
     attack_family_filter: Optional[List[str]] = None,
+    max_per_family: int = 100,
 ) -> List[dict]:
     """
     Loads adversarial prompts from JailbreakBench, HarmBench, or PKU-SafeRLHF.
@@ -152,15 +154,19 @@ def load_adversarial_prompts(
 
     attack_family_filter: optional list of subset prefixes to keep (e.g.
     "jbb_GCG", "template_jailbreak"). When set, ALL prompts of the selected
-    families are kept (num_samples no longer caps the adversarial set).
+    families are kept (num_samples no longer caps the adversarial set), each
+    family capped at `max_per_family` (100) for a balanced suite.
     """
     dataset_lower = dataset_name.lower()
 
     if "jailbreak" in dataset_lower or "jbb" in dataset_lower:
         print("[DATA] Loading JailbreakBench artifacts (transfer attacks) + template-wrapped fallback...")
         prompts = load_jbb_transfer_prompts(combos=jbb_combos)
-        print(f"[DATA] Building template-wrapped fallback subset ({len(JAILBREAK_TEMPLATES)} templates x {template_goals} goals)...")
-        prompts += load_template_wrapped_prompts(load_jbb_goals(num_goals=template_goals))
+        print(f"[DATA] Building template-wrapped fallback subset ({min(template_count, len(JAILBREAK_TEMPLATES))} template(s) x {template_goals} goals)...")
+        prompts += load_template_wrapped_prompts(
+            load_jbb_goals(num_goals=template_goals),
+            templates=JAILBREAK_TEMPLATES[:template_count or len(JAILBREAK_TEMPLATES)],
+        )
 
     elif "harmbench" in dataset_lower:
         # Plain behavior text only (no ready-made adversarial test cases without
@@ -203,8 +209,18 @@ def load_adversarial_prompts(
 
     if attack_family_filter:
         kept = [p for p in prompts if any(p["subset"].startswith(f) for f in attack_family_filter)]
-        print(f"[DATA] Attack-family filter {attack_family_filter}: kept {len(kept)} of {len(prompts)} prompts.")
-        prompts = kept
+        # Cap each matched family at max_per_family for a balanced suite.
+        capped = []
+        counts = {}
+        for p in kept:
+            s = p["subset"]
+            counts[s] = counts.get(s, 0)
+            if counts[s] < max_per_family:
+                capped.append(p)
+                counts[s] += 1
+        print(f"[DATA] Attack-family filter {attack_family_filter}: kept {len(capped)} of {len(prompts)} prompts (per-family cap={max_per_family}).")
+        print(f"[DATA] Per-family counts: {counts}")
+        prompts = capped
         # Filter mode = run the full selected families (no adversarial cap).
         num_samples = None
 
@@ -297,21 +313,25 @@ def get_or_create_evaluation_suite(
     device: str = "cuda",
     jbb_combos: Optional[List[Tuple[str, str, str]]] = None,
     template_goals: int = 50,
+    template_count: int = 1,
     attack_family_filter: Optional[List[str]] = None,
+    max_per_family: int = 100,
 ) -> Tuple[List[dict], List[str]]:
     """
     Obtains cached or freshly loaded evaluation splits.
 
     Adversarial prompts carry per-prompt {"prompt", "subset", "goal"} metadata
     so results can be broken down by attack family; benign prompts are plain strs.
-    attack_family_filter keeps only matching families and is hashed into the cache
-    filename so filtered and full caches never collide.
+    attack_family_filter keeps only matching families (capped per family) and is
+    hashed into the cache filename so filtered and full caches never collide
+    (as are template_goals/template_count, so config edits rebuild the cache).
     """
     os.makedirs(cache_dir, exist_ok=True)
     fam_slug = "all" if not attack_family_filter else hashlib.md5(",".join(sorted(attack_family_filter)).encode()).hexdigest()[:8]
+    tpl_slug = hashlib.md5(f"g{template_goals}c{template_count}m{max_per_family}".encode()).hexdigest()[:8]
     cache_file = os.path.join(
         cache_dir,
-        f"eval_set_{adv_dataset_name}_{benign_dataset_name}_{num_samples or 'all'}_s{seed}_f{fam_slug}.json"
+        f"eval_set_{adv_dataset_name}_{benign_dataset_name}_{num_samples or 'all'}_s{seed}_f{fam_slug}_t{tpl_slug}.json"
     )
 
     if os.path.exists(cache_file):
@@ -339,7 +359,9 @@ def get_or_create_evaluation_suite(
         device=device,
         jbb_combos=jbb_combos,
         template_goals=template_goals,
+        template_count=template_count,
         attack_family_filter=attack_family_filter,
+        max_per_family=max_per_family,
     )
 
     benign_prompts = load_benign_prompts(

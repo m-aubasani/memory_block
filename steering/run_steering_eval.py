@@ -234,6 +234,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
             device=str(device),
             jbb_combos=eval_cfg.get("jbb_artifact_combos"),
             template_goals=eval_cfg.get("template_goals", 50),
+            template_count=eval_cfg.get("template_count", 1),
             attack_family_filter=eval_cfg.get("attack_family_filter"),
         )
 

@@ -24,10 +24,12 @@ evaluation:
   #  gpt-3.5-turbo-1106, gpt-4-0125-preview) + @template_goals template-wrapped goals.
   # Override with a list, e.g. [["PAIR", "vicuna-13b-v1.5", "black_box"]].
   jbb_artifact_combos: null
-  template_goals: 50 # number of plain JBB goals wrapped with static jailbreak templates
+  template_goals: 100 # number of plain JBB goals wrapped with static jailbreak templates (100 goals x template_count = template_jailbreak prompts)
+  template_count: 1 # how many of the JAILBREAK_TEMPLATES to use when wrapping each goal (1 = only the first/DAN template)
   # Attack-family filter: prefix-matches each prompt's `subset`. Default = top-5
-  # diverse families (~582 adversarial prompts). Set `null` to keep ALL families.
-  attack_family_filter: ["jbb_GCG_vicuna-13b-v1.5", "jbb_GCG_gpt-4-0125-preview", "jbb_PAIR_vicuna-13b-v1.5", "jbb_prompt_with_random_search_gpt-4-0125-preview", "template_jailbreak"]
+  # diverse families (~500 adversarial prompts: 4 JBB artifact families ~100 each
+  # + template_jailbreak = template_goals x template_count). Set `null` to keep ALL families.
+  attack_family_filter: ["jbb_GCG_vicuna-13b-v1.5", "jbb_GCG_gpt-4-0125-preview", "jbb_prompt_with_random_search_gpt-4-0125-preview", "jbb_prompt_with_random_search_llama-2-7b-chat-hf", "template_jailbreak"]
   num_samples: null # null for full benchmark (filtered families when attack_family_filter is set)
   batch_size: 32 # increased batch size for batched generation speedup
   classifier_batch_size: 64 # batch size for GLiGuard and RefusalChecker

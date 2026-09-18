@@ -29,15 +29,19 @@ This module implements high-performance inference-time safety alignment via Cont
    - **`jailbreakbench`** (default): Real jailbreak-wrapped attack prompts from all 12
      available `JailbreakBench/artifacts` transfer artifacts (PAIR / GCG /
      prompt_with_random_search x vicuna-13b-v1.5, llama-2-7b-chat-hf,
-     gpt-3.5-turbo-1106, gpt-4-0125-preview; ~1037 prompts) **plus** a static
-     template-wrapping fallback subset (DAN / AIM / Developer-Mode framings over
-     50 JBB goals; 200 prompts). Each prompt is tagged with its `subset`
-     (method/source-model) so results are reported per attack family, not as one
-     aggregate. Saved to `steering/results/per_subset_safety_jailbreakbench.csv`.
+     gpt-3.5-turbo-1106, gpt-4-0125-preview; ~100 prompts per family) **plus** a static
+     template-wrapping fallback subset. Template fallback = `template_goals`
+     plain JBB goals wrapped by the first `template_count` templates (default
+     100 goals x 1 DAN template = 100 prompts; increase `template_count` to use
+     AIM / Developer-Mode / story framings too). Each prompt is tagged with its
+     `subset` (method/source-model) so results are reported per attack family,
+     not as one aggregate. Saved to
+     `steering/results/per_subset_safety_jailbreakbench.csv`.
    - **Family filtering**: set `evaluation.attack_family_filter` in
      `steering_config.yaml` to a list of subset prefixes (e.g. `jbb_GCG`,
      `template_jailbreak`) to run ONLY those attack families (all their prompts,
-     no cap; default top-5 ≈ 582 prompts). Set it to `null` to keep all families.
+     each family capped at `max_per_family` = 100; default top-5 ≈ 500 prompts).
+     Set it to `null` to keep all families.
    - **`harmbench`** (CAIS HarmBench, 400 behaviors): Plain behavior text only —
      HarmBench provides no ready-made adversarial test cases without running its
      own attack pipeline, so this is effectively disabled by default.
@@ -115,6 +119,8 @@ sweep:
 evaluation:
   adversarial_dataset: "jailbreakbench" # "jailbreakbench", "harmbench", or "pku"
   benign_dataset: "xstest"              # "xstest", "jailbreakbench", or "pku"
+  template_goals: 100                   # plain JBB goals wrapped as template_jailbreak prompts
+  template_count: 1                     # templates to use per goal (1 = DAN only; 4 = all framings)
   batch_size: 32
   classifier_batch_size: 64
   max_new_tokens: 40                    # 40 for fast sweep, 100 for full text
