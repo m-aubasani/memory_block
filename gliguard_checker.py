@@ -1,7 +1,15 @@
 import os
 import sys
+import warnings
 import torch
 from typing import List, Union, Optional, Dict, Any
+
+warnings.warn(
+    "gliguard_checker.GLiGuardChecker is deprecated — use steering.wildguard_eval.WildGuardChecker (allenai/wildguard) instead. "
+    "This wrapper is kept for backward compatibility and will be removed.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 # Ensure stdout uses UTF-8 to prevent encoding errors on non-UTF8 console environments
 if hasattr(sys.stdout, "reconfigure"):

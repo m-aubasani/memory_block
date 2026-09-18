@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 import json
 import math
 import time
@@ -23,11 +24,14 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from refusal_checker import RefusalChecker
-from gliguard_checker import GLiGuardChecker
+from steering.wildguard_eval import WildGuardChecker
 from steering.steering_hook import SteeringHook
 from steering.generator import SteeredGenerator
 from steering.dataset_loader import get_or_create_evaluation_suite
+
+# Legacy checkers are now deprecated wrappers; import suppressed to avoid DeprecationWarning noise
+# from refusal_checker import RefusalChecker  # deprecated -> steering.wildguard_eval.WildGuardChecker
+# from gliguard_checker import GLiGuardChecker  # deprecated -> steering.wildguard_eval.WildGuardChecker
 
 
 def load_yaml_config(config_path: str):
@@ -213,11 +217,16 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
         cache_dir = eval_cfg.get("eval_cache_dir", "steering/eval_cache")
         num_samples = eval_cfg.get("num_samples", None)
         harmbench_url = eval_cfg.get("harmbench_url", "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_all.csv")
-        guard_model_name = eval_cfg.get("guard_model", "fastino/gliguard-LLMGuardrails-300M")
-        refusal_model_name = eval_cfg.get("refusal_classifier_model", "natong19/refusal_classifier")
+        # WildGuard unified checker (replaces GLiGuard + RefusalChecker)
+        wildguard_model = eval_cfg.get("wildguard_model", eval_cfg.get("guard_model", "allenai/wildguard"))
+        wildguard_dtype = eval_cfg.get("wildguard_dtype", "bfloat16")
+        wildguard_max_new = eval_cfg.get("wildguard_max_new_tokens", 32)
+        # Legacy names kept for backwards compat
+        guard_model_name = eval_cfg.get("guard_model", wildguard_model)
+        refusal_model_name = eval_cfg.get("refusal_classifier_model", wildguard_model)
         filter_eval_with_guard = eval_cfg.get("filter_eval_with_guard", False)
         batch_size = eval_cfg.get("batch_size", 32)
-        clf_batch_size = eval_cfg.get("classifier_batch_size", 64)
+        clf_batch_size = eval_cfg.get("wildguard_batch_size", eval_cfg.get("classifier_batch_size", 8))
         max_new_tokens = eval_cfg.get("max_new_tokens", 40)
         boot_iters = eval_cfg.get("bootstrap_iterations", 1000)
 
@@ -392,52 +401,75 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
         t_gen_end = time.time()
         print(f"✅ Text generation completed in {t_gen_end - t_gen_start:.1f}s.")
 
-        # Clean VRAM cache before classification
+        # =========================================================================
+        # VRAM PURGE (MANDATED BY wildg_plan.md: del model, del tokenizer, gc.collect, empty_cache)
+        # =========================================================================
+        print("\n" + "=" * 60)
+        print("🧹 VRAM PURGE — removing primary model before WildGuard")
+        print("=" * 60)
+        # Optional: persist generations to tmp file for crash recovery & true two-phase separation
+        tmp_gen_path = eval_cfg.get("wildguard_tmp_path", "steering/results/tmp_generations.json")
+        try:
+            os.makedirs(os.path.dirname(tmp_gen_path), exist_ok=True)
+            serial_payload = {
+                "adv_prompts": adv_prompts,
+                "safe_prompts": safe_prompts,
+                "generated_responses": {f"{k[0]}__{k[1]}": v for k, v in generated_responses.items()},
+                "meta": {"model": model_cfg.get("name"), "adv_dataset": adv_dataset_name},
+            }
+            with open(tmp_gen_path, "w", encoding="utf-8") as _f:
+                json.dump(serial_payload, _f)
+            print(f"[PIPELINE] Saved intermediate generations to '{tmp_gen_path}'")
+        except Exception as e:
+            print(f"[WARN] Could not save tmp generations ({e})")
+
+        # Strict purge: del model, del tokenizer
+        del base_model
+        del tokenizer
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        print("✅ Primary model purged (del base_model, del tokenizer, gc.collect(), empty_cache)")
 
         # =========================================================================
-        # STAGE 2: CONTINUOUS BATCH CLASSIFICATION (LOAD CLASSIFIERS ONCE)
+        # STAGE 2: WildGuard EVALUATION (single unified classifier, post-purge)
         # =========================================================================
         t_clf_start = time.time()
         print("\n" + "=" * 60)
-        print("🔍 STAGE 2: CONTINUOUS BATCH CLASSIFICATION (Single Load Pass)")
+        print("🔍 STAGE 2: WildGuard Classification (Single Load Pass, post-purge)")
         print("=" * 60)
+        print(f"Loading WildGuard classifier '{wildguard_model}' (dtype={wildguard_dtype}) once for ALL responses...")
 
-        # 2.1 Adversarial Safety Classification with GLiGuard (Single Pass)
-        print(f"\nLoading GLiGuard classifier '{guard_model_name}' once for all adversarial responses...")
-        guard = GLiGuardChecker(model_name=guard_model_name, device=str(device))
+        wildguard = WildGuardChecker(model_name=wildguard_model, device=str(device), dtype=wildguard_dtype, max_new_tokens=wildguard_max_new)
 
         adv_keys = ["baseline", "sysprompt"] + [cfg["key"] for cfg in steered_configs]
-        adv_scores_dict = {}
-
-        for key in tqdm(adv_keys, desc="GLiGuard Safety Scoring"):
-            responses = generated_responses[(key, "adv")]
-            is_safe_list = guard.is_response_safe(responses, prompts=adv_prompt_texts, batch_size=clf_batch_size)
-            adv_scores_dict[key] = is_safe_list
-
-        del guard
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # 2.2 Benign Over-Refusal Classification with RefusalChecker (Single Pass)
-        print(f"\nLoading RefusalChecker classifier '{refusal_model_name}' once for all benign responses...")
-        checker = RefusalChecker(model_name=refusal_model_name, device=device)
-
         safe_keys = ["baseline", "sysprompt"] + [cfg["key"] for cfg in steered_configs]
+        adv_scores_dict = {}
         safe_scores_dict = {}
 
-        for key in tqdm(safe_keys, desc="RefusalChecker Scoring"):
-            responses = generated_responses[(key, "safe")]
-            is_refusal_list = checker.is_refusal(responses)
-            safe_scores_dict[key] = is_refusal_list
+        for key in tqdm(adv_keys, desc="WildGuard Adv Safety Scoring"):
+            responses = generated_responses[(key, "adv")]
+            # WildGuard uses prompt+response to detect harmful response / refusal
+            adv_scores_dict[key] = wildguard.is_response_safe(responses, prompts=adv_prompt_texts, batch_size=clf_batch_size)
 
-        del checker
+        for key in tqdm(safe_keys, desc="WildGuard Benign Refusal Scoring"):
+            responses = generated_responses[(key, "safe")]
+            safe_scores_dict[key] = wildguard.is_refusal(responses, prompts=safe_prompts, batch_size=clf_batch_size)
+
+        # Log sample parsing diagnostics (first baseline)
+        try:
+            _sample = wildguard.classify([{"prompt": adv_prompt_texts[0], "response": generated_responses[("baseline", "adv")][0]}], batch_size=1)[0]
+            print(f"[WildGuard sample] prompt_harm={_sample['prompt_harmfulness']} refusal={_sample['response_refusal']} resp_harm={_sample['response_harmfulness']} parse_err={_sample['is_parsing_error']}")
+        except Exception:
+            pass
+
+        del wildguard
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         t_clf_end = time.time()
-        print(f"✅ Safety classification completed in {t_clf_end - t_clf_start:.1f}s.")
+        print(f"✅ WildGuard classification completed in {t_clf_end - t_clf_start:.1f}s.")
 
         # =========================================================================
         # STAGE 3: METRICS, BOOTSTRAP CONFIDENCE INTERVALS, & W&B LOGGING

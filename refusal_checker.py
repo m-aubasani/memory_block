@@ -1,5 +1,13 @@
+import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+warnings.warn(
+    "refusal_checker.RefusalChecker is deprecated — use steering.wildguard_eval.WildGuardChecker (allenai/wildguard) instead. "
+    "This wrapper is kept for backward compatibility and will be removed.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 class RefusalChecker:
     def __init__(self, model_name="natong19/refusal_classifier", device=None):

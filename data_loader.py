@@ -1,8 +1,20 @@
 import torch
 from torch.utils.data import Dataset
 from datasets import load_dataset
-from refusal_checker import RefusalChecker
-from gliguard_checker import GLiGuardChecker
+
+# WildGuard is the unified replacement; legacy checkers kept as fallback
+try:
+    from steering.wildguard_eval import WildGuardChecker
+except Exception:
+    WildGuardChecker = None
+try:
+    from refusal_checker import RefusalChecker
+except Exception:
+    RefusalChecker = WildGuardChecker  # type: ignore
+try:
+    from gliguard_checker import GLiGuardChecker
+except Exception:
+    GLiGuardChecker = WildGuardChecker  # type: ignore
 
 class AlignmentDataset(Dataset):
     def __init__(
@@ -34,17 +46,25 @@ class AlignmentDataset(Dataset):
                 lambda x: x['is_response_0_safe'] != x['is_response_1_safe']
             )
 
-            # Optional refusal filtering: Evaluate safe response with RefusalChecker and keep only refusals
+            # Optional refusal filtering: Evaluate safe response with WildGuard (replaces RefusalChecker)
             if filter_refusal_only:
-                print("Evaluating and filtering dataset to retain ONLY safe responses that are explicit refusals...")
-                checker = RefusalChecker(model_name=refusal_model_name, device=device)
+                print("Evaluating and filtering dataset to retain ONLY safe responses that are explicit refusals (WildGuard)...")
+                # Prefer WildGuard if available
+                if WildGuardChecker is not None and "wildguard" in refusal_model_name.lower():
+                    checker = WildGuardChecker(model_name=refusal_model_name, device=device)  # type: ignore
+                    filter_is_wildguard = True
+                else:
+                    checker = RefusalChecker(model_name=refusal_model_name, device=device)  # type: ignore
+                    filter_is_wildguard = False
 
                 def filter_refusal_fn(batch):
                     safe_texts = []
                     safer_ids = batch.get("safer_response_id", batch.get("safe_response_id", [0] * len(batch["response_0"])))
                     for safer_id, r0, r1 in zip(safer_ids, batch["response_0"], batch["response_1"]):
                         safe_texts.append(r0 if safer_id == 0 else r1)
-                    return checker.is_refusal(safe_texts)
+                    if filter_is_wildguard:
+                        return checker.is_refusal(safe_texts)  # type: ignore
+                    return checker.is_refusal(safe_texts)  # type: ignore
 
                 self.dataset = self.dataset.filter(
                     filter_refusal_fn, batched=True, batch_size=refusal_filter_batch_size
@@ -53,6 +73,8 @@ class AlignmentDataset(Dataset):
 
                 # Free classifier VRAM
                 del checker
+                import gc
+                gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         else:
@@ -74,24 +96,31 @@ class AlignmentDataset(Dataset):
                 candidate_limit = min(len(self.dataset), max_samples * 4)
                 self.dataset = self.dataset.select(range(candidate_limit))
 
-            # Filter input prompts using GLiGuard
+            # Filter input prompts using WildGuard (replaces GLiGuard) when model is wildguard
             if filter_eval_with_guard:
-                print(f"Filtering input prompts using GLiGuard ({guard_model_name}) for eval_mode='{eval_mode}'...")
-                guard = GLiGuardChecker(model_name=guard_model_name, device=device)
+                use_wildguard = WildGuardChecker is not None and "wildguard" in guard_model_name.lower()
+                label = "WildGuard" if use_wildguard else "GLiGuard"
+                print(f"Filtering input prompts using {label} ({guard_model_name}) for eval_mode='{eval_mode}'...")
+                if use_wildguard:
+                    guard = WildGuardChecker(model_name=guard_model_name, device=device)  # type: ignore
+                else:
+                    guard = GLiGuardChecker(model_name=guard_model_name, device=device)  # type: ignore
 
                 def filter_guard_prompt_fn(batch):
                     prompts = batch["prompt"]
                     if eval_mode == "safe":
-                        return guard.is_prompt_safe(prompts, batch_size=guard_filter_batch_size)
+                        return guard.is_prompt_safe(prompts, batch_size=guard_filter_batch_size)  # type: ignore
                     else:
-                        return guard.is_prompt_unsafe(prompts, batch_size=guard_filter_batch_size)
+                        return guard.is_prompt_unsafe(prompts, batch_size=guard_filter_batch_size)  # type: ignore
 
                 self.dataset = self.dataset.filter(
                     filter_guard_prompt_fn, batched=True, batch_size=guard_filter_batch_size
                 )
-                print(f"GLiGuard prompt filtering complete: {len(self.dataset)} samples retained.")
+                print(f"{label} prompt filtering complete: {len(self.dataset)} samples retained.")
 
                 del guard
+                import gc
+                gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 

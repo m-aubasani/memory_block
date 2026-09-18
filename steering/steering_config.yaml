@@ -34,12 +34,19 @@ evaluation:
   max_per_family: 400 # per-family cap for the attack-family filter (must be >= template_goals x template_count when template_jailbreak is the only family)
   num_samples: null # null for full benchmark (filtered families when attack_family_filter is set)
   batch_size: 32 # increased batch size for batched generation speedup
-  classifier_batch_size: 64 # batch size for GLiGuard and RefusalChecker
+  classifier_batch_size: 64 # legacy: GLiGuard/Refusal batch size (kept for compat, use wildguard_batch_size)
+  wildguard_batch_size: 8 # WildGuard (7B) batch size - keep small for T4 15GB (OOM prevention)
+  wildguard_max_new_tokens: 32 # WildGuard generation length (parsing only needs short answer)
   max_new_tokens: 60 # 60 tokens for fast exploratory sweep (enough for refusal detection)
   constitution_path: "constitution.txt"
   eval_cache_dir: "steering/eval_cache"
-  refusal_classifier_model: "natong19/refusal_classifier"
-  guard_model: "fastino/gliguard-LLMGuardrails-300M"
+  # WildGuard unified safety & refusal checker (replaces GLiGuard + RefusalChecker)
+  wildguard_model: "allenai/wildguard"
+  wildguard_dtype: "bfloat16" # bfloat16 preferred on T4; fallback float16
+  wildguard_tmp_path: "steering/results/tmp_generations.json" # intermediate save for two-phase VRAM purge
+  # Legacy (deprecated) — kept for backward compat, ignored when wildguard_model is set
+  refusal_classifier_model: "allenai/wildguard"
+  guard_model: "allenai/wildguard"
   filter_eval_with_guard: false # false for standard benchmarks like JBB / HarmBench / XSTest
   bootstrap_iterations: 1000
   bootstrap_seed: 42

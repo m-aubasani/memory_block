@@ -1,10 +1,10 @@
+import gc
 import torch
 import pandas as pd
 import wandb
 from tqdm import tqdm
 from data_loader import AlignmentDataset
-from refusal_checker import RefusalChecker
-from gliguard_checker import GLiGuardChecker
+from steering.wildguard_eval import WildGuardChecker
 
 
 def generate_in_batches(
@@ -55,8 +55,12 @@ def run_evaluation(
     max_new_tokens=100,
     constitution_path="constitution.txt",
     dataset_name="PKU-Alignment/PKU-SafeRLHF",
-    refusal_model_name="natong19/refusal_classifier",
-    guard_model_name="fastino/gliguard-LLMGuardrails-300M",
+    wildguard_model_name="allenai/wildguard",
+    wildguard_dtype="bfloat16",
+    wildguard_batch_size=8,
+    wildguard_max_new_tokens=32,
+    refusal_model_name="allenai/wildguard",  # deprecated alias -> wildguard
+    guard_model_name="allenai/wildguard",  # deprecated alias -> wildguard
     filter_eval_with_guard=True,
     output_path="alignment_eval_results.csv",
     eval_mode="adversarial",
@@ -166,22 +170,42 @@ def run_evaluation(
     tokenizer.padding_side = orig_padding_side
 
     # ==========================================
-    # BATCH EVALUATION & SAFETY SCORING
+    # VRAM PURGE: Primary model no longer needed before WildGuard eval
+    # ==========================================
+    # Keep generated strings but purge primary model + injected generator refs to free VRAM for 7B WildGuard
+    # Caller still holds model/tokenizer outside; we only flush CUDA cache and allow GC.
+    # For strict 15GB T4 compliance, caller should del model/tokenizer before invoking this function
+    # or use steering/eval_pipeline.py. Here we do a soft purge (cache clear).
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # ==========================================
+    # BATCH EVALUATION & SAFETY SCORING (WildGuard unified)
     # ==========================================
     results = []
 
+    # Resolve model name (support deprecated aliases)
+    wg_model = wildguard_model_name
+    if wg_model == "allenai/wildguard" and guard_model_name != "allenai/wildguard" and "wildguard" not in guard_model_name.lower():
+        # If user explicitly passed old guard model, respect wildguard override already set
+        pass
+    # Legacy: refusal_model_name/guard_model_name ignored when wildguard_model_name is explicit (default is wildguard)
+    # Allow passing wildguard via old param names for backward compat
+    if wg_model == "allenai/wildguard":
+        if refusal_model_name != "allenai/wildguard" and "wildguard" in refusal_model_name.lower():
+            wg_model = refusal_model_name
+        elif guard_model_name != "allenai/wildguard" and "wildguard" in guard_model_name.lower():
+            wg_model = guard_model_name
+
+    print(f"\nEvaluating responses with WildGuard ({wg_model}) in batches (batch_size={wildguard_batch_size})...")
+    checker = WildGuardChecker(model_name=wg_model, device=device, dtype=wildguard_dtype, max_new_tokens=wildguard_max_new_tokens)
+
     if eval_mode != "safe":
-        # Unsafe / Adversarial Eval Set: Evaluate response safety with GLiGuard in batches
-        print("\nEvaluating responses with GLiGuard in batches...")
-        guard = GLiGuardChecker(model_name=guard_model_name, device=device)
-
-        base_safe = guard.is_response_safe(base_responses, prompts=prompts, batch_size=batch_size)
-        sys_safe = guard.is_response_safe(sys_responses, prompts=prompts, batch_size=batch_size)
-        inj_safe = guard.is_response_safe(inj_responses, prompts=prompts, batch_size=batch_size)
-
-        del guard
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Adversarial: response safety = not harmful (or refusal counts as safe)
+        base_safe = checker.is_response_safe(base_responses, prompts=prompts, batch_size=wildguard_batch_size)
+        sys_safe = checker.is_response_safe(sys_responses, prompts=prompts, batch_size=wildguard_batch_size)
+        inj_safe = checker.is_response_safe(inj_responses, prompts=prompts, batch_size=wildguard_batch_size)
 
         for idx, p in enumerate(prompts):
             results.append({
@@ -194,17 +218,10 @@ def run_evaluation(
                 "Injected_Safe": inj_safe[idx],
             })
     else:
-        # Safe / Benign Eval Set: Evaluate refusal rate with RefusalChecker in batches
-        print("\nEvaluating responses with RefusalChecker in batches...")
-        checker = RefusalChecker(model_name=refusal_model_name, device=device)
-
-        base_refused = checker.is_refusal(base_responses)
-        sys_refused = checker.is_refusal(sys_responses)
-        inj_refused = checker.is_refusal(inj_responses)
-
-        del checker
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Benign: over-refusal = WildGuard refusal detection with prompt context
+        base_refused = checker.is_refusal(base_responses, prompts=prompts, batch_size=wildguard_batch_size)
+        sys_refused = checker.is_refusal(sys_responses, prompts=prompts, batch_size=wildguard_batch_size)
+        inj_refused = checker.is_refusal(inj_responses, prompts=prompts, batch_size=wildguard_batch_size)
 
         for idx, p in enumerate(prompts):
             results.append({
@@ -216,6 +233,11 @@ def run_evaluation(
                 "SysPrompt_Refused": sys_refused[idx],
                 "Injected_Refused": inj_refused[idx],
             })
+
+    del checker
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # ==========================================
     # METRICS & COMPARISON REPORT
