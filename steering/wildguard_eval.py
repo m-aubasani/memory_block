@@ -244,7 +244,7 @@ class WildGuardChecker:
         iterator = range(0, len(items), batch_size)
         if show_progress:
             from tqdm import tqdm
-            iterator = tqdm(iterator, desc="WildGuard classify")
+            iterator = tqdm(iterator, desc="WildGuard classify", leave=False)
 
         for start in iterator:
             batch = items[start : start + batch_size]
