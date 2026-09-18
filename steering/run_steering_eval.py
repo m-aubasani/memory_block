@@ -236,6 +236,7 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
             template_goals=eval_cfg.get("template_goals", 50),
             template_count=eval_cfg.get("template_count", 1),
             attack_family_filter=eval_cfg.get("attack_family_filter"),
+            max_per_family=eval_cfg.get("max_per_family", 100),
         )
 
         # Adversarial prompts carry per-prompt {prompt, subset, goal} metadata.
