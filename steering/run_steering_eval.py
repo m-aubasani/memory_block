@@ -447,14 +447,21 @@ def run_sweep(config_path: str = "steering/steering_config.yaml", override_adv_d
         adv_scores_dict = {}
         safe_scores_dict = {}
 
-        for key in tqdm(adv_keys, desc="WildGuard Adv Safety Scoring"):
+        for idx, key in enumerate(adv_keys, 1):
             responses = generated_responses[(key, "adv")]
-            # WildGuard uses prompt+response to detect harmful response / refusal
-            adv_scores_dict[key] = wildguard.is_response_safe(responses, prompts=adv_prompt_texts, batch_size=clf_batch_size)
+            # WildGuard uses prompt+response to detect harmful response / refusal.
+            # Single-line batch-by-batch bar (inner tqdm); per-variant result printed on finish.
+            scores = wildguard.is_response_safe(responses, prompts=adv_prompt_texts, batch_size=clf_batch_size, show_progress=True, desc=f"WildGuard Adv [{idx}/{len(adv_keys)}] {key}")
+            adv_scores_dict[key] = scores
+            rate = 100.0 * sum(1 for s in scores) / len(scores) if scores else 0.0
+            print(f"[WildGuard Adv {idx}/{len(adv_keys)}] {key}: {rate:.1f}% safe ({sum(1 for s in scores)}/{len(scores)})", flush=True)
 
-        for key in tqdm(safe_keys, desc="WildGuard Benign Refusal Scoring"):
+        for idx, key in enumerate(safe_keys, 1):
             responses = generated_responses[(key, "safe")]
-            safe_scores_dict[key] = wildguard.is_refusal(responses, prompts=safe_prompts, batch_size=clf_batch_size)
+            scores = wildguard.is_refusal(responses, prompts=safe_prompts, batch_size=clf_batch_size, show_progress=True, desc=f"WildGuard Safe [{idx}/{len(safe_keys)}] {key}")
+            safe_scores_dict[key] = scores
+            rate = 100.0 * sum(1 for s in scores) / len(scores) if scores else 0.0
+            print(f"[WildGuard Safe {idx}/{len(safe_keys)}] {key}: {rate:.1f}% refused ({sum(1 for s in scores)}/{len(scores)})", flush=True)
 
         # Log sample parsing diagnostics (first baseline)
         try:

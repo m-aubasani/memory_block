@@ -341,6 +341,7 @@ class WildGuardChecker:
         items: List[Dict[str, str]],
         batch_size: int = 8,
         show_progress: bool = False,
+        desc: str = "WildGuard",
     ) -> List[Dict[str, Any]]:
         """
         General classify API.
@@ -354,8 +355,8 @@ class WildGuardChecker:
         iterator = range(0, len(items), batch_size)
         if show_progress:
             from tqdm import tqdm
-            # Single-line progress: leave=True so bar stays, no extra prints to keep Colab to one line
-            iterator = tqdm(iterator, desc="WildGuard", file=sys.stdout, leave=True, dynamic_ncols=True, mininterval=0.3)
+            # Single-line progress: leave=False so next variant reuses the same line
+            iterator = tqdm(iterator, desc=desc, file=sys.stdout, leave=False, dynamic_ncols=True, mininterval=0.3)
 
         for start in iterator:
             batch = items[start : start + batch_size]
@@ -426,6 +427,8 @@ class WildGuardChecker:
         responses: Union[str, List[str]],
         prompts: Optional[Union[str, List[str]]] = None,
         batch_size: int = 8,
+        show_progress: bool = False,
+        desc: str = "WildGuard",
     ) -> List[Dict[str, Any]]:
         is_single = isinstance(responses, str)
         response_list = [responses] if is_single else list(responses)
@@ -437,7 +440,7 @@ class WildGuardChecker:
             prompt_list = [""] * len(response_list)
 
         items = [{"prompt": p, "response": r} for p, r in zip(prompt_list, response_list)]
-        results = self.classify(items, batch_size=batch_size)
+        results = self.classify(items, batch_size=batch_size, show_progress=show_progress, desc=desc)
         return results[0] if is_single else results  # type: ignore
 
     def is_response_safe(
@@ -445,6 +448,8 @@ class WildGuardChecker:
         responses: Union[str, List[str]],
         prompts: Optional[Union[str, List[str]]] = None,
         batch_size: int = 8,
+        show_progress: bool = False,
+        desc: str = "WildGuard",
     ) -> Union[bool, List[bool]]:
         """
         Response is safe if:
@@ -452,7 +457,7 @@ class WildGuardChecker:
           - response_refusal == 'refusal' (refusal prevents harm, mirrors old GLiGuard rule)
         """
         is_single = isinstance(responses, str)
-        results = self.classify_responses(responses, prompts=prompts, batch_size=batch_size)
+        results = self.classify_responses(responses, prompts=prompts, batch_size=batch_size, show_progress=show_progress, desc=desc)
         res_list = [results] if is_single else results  # type: ignore
         verdicts = []
         for r in res_list:
@@ -479,6 +484,8 @@ class WildGuardChecker:
         text: Union[str, List[str]],
         prompts: Optional[Union[str, List[str]]] = None,
         batch_size: int = 8,
+        show_progress: bool = False,
+        desc: str = "WildGuard",
     ) -> Union[bool, List[bool]]:
         """
         Drop-in replacement for RefusalChecker.is_refusal.
@@ -498,6 +505,8 @@ class WildGuardChecker:
         results = self.classify(
             [{"prompt": p, "response": r} for p, r in zip(prompt_list, response_list)],
             batch_size=batch_size,
+            show_progress=show_progress,
+            desc=desc,
         )
         verdicts = [r.get("response_refusal") == "refusal" for r in results]
         return verdicts[0] if is_single else verdicts
