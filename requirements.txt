@@ -7,3 +7,4 @@ tqdm
 pyyaml
 wandb
 gliner2[local]
+bitsandbytes
