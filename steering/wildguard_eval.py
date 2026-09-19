@@ -17,11 +17,33 @@ References:
 
 import gc
 import re
+import os
 import sys
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Optional 4-bit quantization (bitsandbytes) — falls back gracefully if not installed
+try:
+    from transformers import BitsAndBytesConfig
+    _BNB_AVAILABLE = True
+except Exception:
+    BitsAndBytesConfig = None  # type: ignore
+    _BNB_AVAILABLE = False
+
+# Speed: allow TF32 on Ampere+ and enable SDPA flash kernel where available
+try:
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(True)
+except Exception:
+    pass
 
 # Ensure UTF-8 stdout on Windows
 if hasattr(sys.stdout, "reconfigure"):
@@ -134,6 +156,9 @@ class WildGuardChecker:
         max_new_tokens: int = 32,
         use_flash_attention: bool = False,
         token: Optional[str] = None,
+        load_in_4bit: bool = True,
+        bnb_4bit_quant_type: str = "nf4",
+        bnb_4bit_use_double_quant: bool = True,
     ):
         import os as _os
 
@@ -143,8 +168,9 @@ class WildGuardChecker:
             self.device = str(device)
 
         # T4 (Turing, sm75) has no native bfloat16 — fall back to float16 for speed/VRAM
+        # When 4-bit is used, compute dtype stays bfloat16 for NF4 dequant, but storage is 4-bit.
         orig_dtype = dtype
-        if self.device.startswith("cuda") and dtype == "bfloat16":
+        if self.device.startswith("cuda") and dtype == "bfloat16" and not load_in_4bit:
             try:
                 major, _ = torch.cuda.get_device_capability()
                 if major < 8:
@@ -168,49 +194,89 @@ class WildGuardChecker:
         else:
             print(f"[WildGuard] No HF_TOKEN found — allenai/wildguard is GATED (https://huggingface.co/allenai/wildguard). Set HF_TOKEN env or huggingface-cli login, else download will 401/hang.", flush=True)
 
-        print(f"Loading WildGuard classifier ({model_name}) on {self.device} (dtype={dtype}, low_cpu_mem_usage) ...", flush=True)
+        # 4-bit quantization: ~3.7x VRAM reduction (7B: 14GB → ~3.8GB), allows batch 32+ on T4
+        quant_config = None
+        use_4bit = load_in_4bit and self.device.startswith("cuda") and torch.cuda.is_available()
+        if use_4bit:
+            if not _BNB_AVAILABLE or BitsAndBytesConfig is None:
+                print("[WildGuard] bitsandbytes not installed — 4-bit requested but unavailable, falling back to full precision. Install with: pip install bitsandbytes", flush=True)
+                use_4bit = False
+            else:
+                try:
+                    import bitsandbytes  # noqa: F401  # verify import
+                    quant_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=bnb_4bit_quant_type,
+                        bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
+                        bnb_4bit_compute_dtype=torch_dtype,
+                    )
+                    print(f"[WildGuard] 4-bit NF4 quantization enabled (compute_dtype={dtype}, double_quant={bnb_4bit_use_double_quant}) — VRAM ~4GB, larger batches safe.", flush=True)
+                except Exception as e:
+                    print(f"[WildGuard] 4-bit enable failed ({e}) — falling back to full precision.", flush=True)
+                    quant_config = None
+                    use_4bit = False
+
+        print(f"Loading WildGuard classifier ({model_name}) on {self.device} (dtype={dtype}, 4bit={use_4bit}, low_cpu_mem_usage) ...", flush=True)
         # Pass token explicitly so 401 surfaces fast instead of hanging prompt
         tok_kwargs = {}
         if hf_token:
             tok_kwargs["token"] = hf_token
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, **tok_kwargs)
-        # WildGuard is Mistral-based. Use sdpa by default to avoid flash-attn dependency on T4.
-        kwargs = dict(dtype=torch_dtype, low_cpu_mem_usage=True)
-        if hf_token:
-            kwargs["token"] = hf_token
-        if use_flash_attention:
-            kwargs["attn_implementation"] = "flash_attention_2"
-            print(f"[WildGuard] Loading with {kwargs} ...", flush=True)
-            self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
-        else:
-            # Prefer sdpa if available; fall back cleanly
+
+        # Build model kwargs — 4-bit uses quantization_config + device_map="auto"
+        if use_4bit:
+            kwargs: Dict[str, Any] = dict(
+                quantization_config=quant_config,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+            )
+            if hf_token:
+                kwargs["token"] = hf_token
+            # SDPA still beneficial with 4-bit; BitsAndBytes handles dequant on the fly
             try:
                 kwargs["attn_implementation"] = "sdpa"
-                print(f"[WildGuard] Attempting load with sdpa, dtype={dtype} ...", flush=True)
+                print(f"[WildGuard] Loading 4-bit with sdpa ...", flush=True)
                 self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
             except Exception as e:
                 kwargs.pop("attn_implementation", None)
-                print(f"[WildGuard] sdpa load failed ({e}), retrying without attn_implementation ...", flush=True)
+                print(f"[WildGuard] 4-bit sdpa load failed ({e}), retrying without attn_implementation ...", flush=True)
                 self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
-
-        print(f"[WildGuard] Model loaded, moving to {self.device} ...", flush=True)
-        # Move to device if not auto (device_map not used — keep explicit)
-        if self.device.startswith("cuda") and torch.cuda.is_available():
-            try:
-                if hasattr(self.model, "hf_device_map") and self.model.hf_device_map:
-                    print(f"[WildGuard] hf_device_map present, skipping .to({self.device})", flush=True)
-                else:
-                    self.model = self.model.to(self.device)
-            except Exception as e:
-                print(f"[WildGuard] .to({self.device}) failed: {e}", flush=True)
+        else:
+            # Full precision path (original)
+            kwargs = dict(dtype=torch_dtype, low_cpu_mem_usage=True)
+            if hf_token:
+                kwargs["token"] = hf_token
+            if use_flash_attention:
+                kwargs["attn_implementation"] = "flash_attention_2"
+                print(f"[WildGuard] Loading with {kwargs} ...", flush=True)
+                self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+            else:
+                try:
+                    kwargs["attn_implementation"] = "sdpa"
+                    print(f"[WildGuard] Attempting load with sdpa, dtype={dtype} ...", flush=True)
+                    self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+                except Exception as e:
+                    kwargs.pop("attn_implementation", None)
+                    print(f"[WildGuard] sdpa load failed ({e}), retrying without attn_implementation ...", flush=True)
+                    self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+            print(f"[WildGuard] Model loaded, moving to {self.device} ...", flush=True)
+            if self.device.startswith("cuda") and torch.cuda.is_available():
+                try:
+                    if hasattr(self.model, "hf_device_map") and self.model.hf_device_map:
+                        print(f"[WildGuard] hf_device_map present, skipping .to({self.device})", flush=True)
+                    else:
+                        self.model = self.model.to(self.device)
+                except Exception as e:
+                    print(f"[WildGuard] .to({self.device}) failed: {e}", flush=True)
 
         self.model.eval()
         self.max_new_tokens = max_new_tokens
         self.model_name = model_name
+        self.load_in_4bit = use_4bit
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        print(f"[WildGuard] Ready on {self.device} (max_new_tokens={max_new_tokens})", flush=True)
+        print(f"[WildGuard] Ready on {self.device} (4bit={use_4bit}, max_new_tokens={max_new_tokens})", flush=True)
 
     # ------------------------------------------------------------------
     # Formatting
@@ -288,9 +354,8 @@ class WildGuardChecker:
         iterator = range(0, len(items), batch_size)
         if show_progress:
             from tqdm import tqdm
-            # Use stdout+leave=False for Colab notebook visibility; flush ensures immediate render
-            iterator = tqdm(iterator, desc="  WildGuard batch", leave=False, file=sys.stdout, mininterval=0.2, dynamic_ncols=True)
-            print(f"  [WildGuard] classify {len(items)} items in {(len(items)+batch_size-1)//batch_size} batches (batch_size={batch_size})", flush=True)
+            # Single-line progress: leave=True so bar stays, no extra prints to keep Colab to one line
+            iterator = tqdm(iterator, desc="WildGuard", file=sys.stdout, leave=True, dynamic_ncols=True, mininterval=0.3)
 
         for start in iterator:
             batch = items[start : start + batch_size]
@@ -300,8 +365,6 @@ class WildGuardChecker:
             raw_outputs = self._generate_batch(formatted)
             for ro in raw_outputs:
                 results.append(_parse_wildguard_output(ro))
-        if show_progress:
-            print(f"  [WildGuard] batch done ({len(results)} results)", flush=True)
         return results
 
     # ------------------------------------------------------------------
